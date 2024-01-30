@@ -1,0 +1,12 @@
+version: '3.9'
+services:
+  dns-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "5335:5335/udp"
+      - "5335:5335/tcp"
+      - "8000:8000"
+    environment:
+      - PUBLIC_DOH_SERVER=https://your-public-doh-server

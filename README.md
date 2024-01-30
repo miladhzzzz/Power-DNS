@@ -1,6 +1,6 @@
 # Power-DNS
 
-Power-DNS is a customizable DNS server written in Go that provides features such as Kubernetes name resolution, DNS over vless for circumventing censorship, and an API for managing DNS records on your local system.
+Power-DNS is a customizable DNS server written in Go that provides features such as Kubernetes name resolution, DNS over ssh for circumventing censorship, and an API for managing DNS records on your local system.
 
 ## Table of Contents
 
@@ -22,9 +22,8 @@ Power-DNS is a powerful DNS server designed for flexibility and extensibility. I
 
 - **Kubernetes Name Resolution:** Provides seamless integration with Kubernetes for resolving names of services.
 
-- **DNS over vless:** Circumvent censorship by forwarding DNS queries over vless to a public DNS-over-HTTPS (DoH) server.
+- **DNS over ssh:** Circumvent censorship by forwarding DNS queries over ssh to a public DNS-over-HTTPS (DoH) server.
 
 - **API for DNS Management:** An API built with Gin allows you to interact with the DNS server, enabling the addition, removal, and retrieval of DNS records.
 
 ## File Structure
-

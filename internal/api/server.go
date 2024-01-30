@@ -3,7 +3,6 @@ package api
 import "github.com/gin-gonic/gin"
 
 func StartGinAPI() {
-
 	r := gin.Default()
 
 	r.GET("/ping", func(c *gin.Context) {
@@ -12,4 +11,5 @@ func StartGinAPI() {
 		})
 	})
 
+	r.Run(":8000")
 }

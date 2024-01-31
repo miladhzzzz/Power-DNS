@@ -6,8 +6,6 @@ import (
 	"github.com/miladhzzzz/power-dns/internal/api/controllers"
 )
 
-var ctx *gin.Context
-
 type DNSRouteController struct {
 	dnsController controllers.DNSController
 }
@@ -19,7 +17,7 @@ func NewDNSRouteController(DNSController controllers.DNSController) DNSRouteCont
 func (dc *DNSRouteController) DNSRoute(rg *gin.RouterGroup) {
 	router := rg.Group("/dns")
 
-	router.GET("/Query", dc.dnsController.Query())
+	router.GET("/Query/:query", dc.dnsController.Query())
 
 	// router.POST("/cli", rc.authController.Cli())
 

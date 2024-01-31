@@ -11,7 +11,7 @@ fi
 # Build the Docker image
 echo "Building docker image ...."
 cd..
-if! docker build -t power-dns:latest.
+if! docker build -t power-dns:latest .
 then
     echo "Failed to build Docker image. Aborting."
     exit 1

@@ -1,27 +1,52 @@
 package controllers
 
 import (
-	"context"
-	"log"
+    "context"
+    "log"
+    "net/http"
 
-	"github.com/gin-gonic/gin"
+    "github.com/gin-gonic/gin"
+
+    "github.com/miladhzzzz/power-dns/internal/dns"
 )
 
 type DNSController struct {
-	ctx context.Context
+    dnsHandler *dns.DnsHandler
+    ctx        context.Context
 }
 
-func NewDNSController() DNSController {
-	return DNSController{ctx: context.TODO()}
+func NewDNSController(dnsHandler *dns.DnsHandler) DNSController {
+    return DNSController{ctx: context.TODO(), dnsHandler: dnsHandler}
 }
 
 func (dc *DNSController) Query() gin.HandlerFunc {
-	return func(ctx *gin.Context) {
-		err, query := ctx.Get("Query")
-		if err != nil {
-			log.Print("no query recieved")
-		}
-		// this is the query over http localy available through api
-		log.Printf("got a query : %v", query)
-	}
+    return func(ctx *gin.Context) {
+        query := ctx.Param("query")
+
+        if query == "" {
+            log.Print("no query received")
+            ctx.JSON(http.StatusBadRequest, gin.H{"error": "No query received"})
+            return
+        }
+
+        resp, err := dc.dnsHandler.HttpQuery(query)
+        if err != nil {
+            log.Printf("couldn't make the request: %v", err)
+            ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+            return
+        }
+
+        // Serialize the DNS response to JSON
+        dnsResponse := make(map[string]interface{})
+        dnsResponse["question"] = resp.Question
+        dnsResponse["answer"] = resp.Answer
+        dnsResponse["authority"] = resp.Ns
+        dnsResponse["additional"] = resp.Extra
+
+        // Send the response back
+        ctx.JSON(http.StatusOK, gin.H{"domain": query, "response": dnsResponse})
+
+        // Log the query
+        log.Printf("got a query: %v", query)
+    }
 }

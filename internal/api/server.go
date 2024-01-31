@@ -10,6 +10,7 @@ import (
 
 	"github.com/miladhzzzz/power-dns/internal/api/controllers"
 	"github.com/miladhzzzz/power-dns/internal/api/routes"
+	"github.com/miladhzzzz/power-dns/internal/dns"
 )
 
 var (
@@ -20,14 +21,17 @@ var (
 )
 
 func init() {
-	DNSController = controllers.NewDNSController()
-	DNSRouteController = routes.NewDNSRouteController(DNSController)
+    dnsHandler := &dns.DnsHandler{} // Initialize DnsHandler instance
+	
 
-	logFile, _ := os.Create("DNS-HTTP.log")
+    DNSController = controllers.NewDNSController(dnsHandler)
+    DNSRouteController = routes.NewDNSRouteController(DNSController)
+ 
+    logFile, _ := os.Create("DNS-HTTP.log")
 
-	server = gin.Default()
+    server = gin.Default()
 
-	server.Use(gin.LoggerWithWriter(logFile))
+    server.Use(gin.LoggerWithWriter(logFile))
 }
 
 func StartGinAPI() {

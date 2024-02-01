@@ -27,7 +27,7 @@ fi
 
 # Tell Argo to listen on localhost:8000
 echo "Running Argo tunnel ..."
-if! nohup cfd tunnel --url localhost:8000 --edge-ip-version auto --no-autoupdate -protocol http2 >>dns.log &
+if! nohup cfd tunnel --url localhost:8000 --edge-ip-version auto --no-autoupdate -protocol http2 >> ~/dns.log &
 then
     echo "Failed to start Argo tunnel. Aborting."
     exit 1
@@ -36,4 +36,4 @@ fi
 # Wait for 5 seconds and cat the log file
 echo "waiting for Tuneel URL ..."
 sleep 5
-cat dns.log
+cat ~/dns.log

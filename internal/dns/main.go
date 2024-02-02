@@ -9,8 +9,10 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/miekg/dns"
+	
 )
 
 var (
@@ -21,16 +23,45 @@ var (
 	dohServer = "https://dns.google/dns-query" // DoHServer google public DoHServer
 )
 
+func NewDnsHandler(cache *Cache) *DnsHandler {
+	return &DnsHandler{
+		relayServer: relayServer,
+		dohServer: dohServer,
+		cache: cache,
+	}
+}
+
 func StartDNSserver() {
+	// Starting caching mechanism
+	cache, err := NewCache(24*time.Hour, "/home/milx/cache.gob")
+
+	if err != nil {
+		log.Printf("couldnt start cache: %v", err)
+	}
+
+
+	// Load cache data from file
+	if err := cache.loadFromFile(); err != nil {
+		log.Printf("failed to load cache from file: %v", err)
+	}
+
+	// initializing the DnsHandler server
 	server := &dns.Server{Addr: fmt.Sprintf(":%d", localPort), Net: "udp"}
-	server.Handler = &DnsHandler{sshConn: "", dohServer: dohServer}
+	server.Handler = &DnsHandler{cache: cache, relayServer: relayServer, dohServer: dohServer}
 
 	go func() {
 		if err := server.ListenAndServe(); err != nil {
 			log.Fatalf("Failed to Start DNS Server: %v", err)
 		}
 	}()
-	defer server.Shutdown()
+	defer func() {
+		// Save cache to file before shutting down
+		if err := cache.saveToFile(); err != nil {
+			log.Printf("failed to save cache to file: %v", err)
+		}
+		server.Shutdown()
+	}()
+
 
 	log.Printf("DNS server listening on port %d", localPort)
 
@@ -39,8 +70,9 @@ func StartDNSserver() {
 }
 
 type DnsHandler struct {
-	sshConn   string
-	dohServer string
+	cache       *Cache
+	dohServer   string
+	relayServer string
 }
 
 func (h *DnsHandler) HttpQuery(domain string) (*dns.Msg, error) {
@@ -75,6 +107,23 @@ func (h *DnsHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	)
 	domain := r.Question[0].Name
 	fmt.Printf("domain : %v", domain)
+
+	// using cache
+
+	// Check cache first
+	cachedResp, ok := h.cache.Get(domain)
+	if ok {
+		fmt.Println("Response found in cache")
+		// Write cached response back to client
+		if err := w.WriteMsg(cachedResp); err != nil {
+			log.Printf("Failed to write cached DNS response: %v", err)
+			// Handle the error accordingly
+			return
+		}
+		log.Printf("Responded with cached DNS response: %v", cachedResp)
+		return
+	}
+
 	// Forward DNS request through SSH tunnel to DoH server
 	resp, err = h.localDNSrelay(r.Question[0].Name, r)
 	if err != nil {
@@ -94,6 +143,9 @@ func (h *DnsHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 			// Handle the error accordingly
 			return
 		}
+
+		// Cache the response
+		h.cache.Set(domain, resp)
 
 		log.Printf("Forwarded DNS request using plain method: %v", r.String())
 		return

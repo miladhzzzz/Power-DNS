@@ -18,7 +18,7 @@ func (dc *DNSRouteController) DNSRoute(rg *gin.RouterGroup) {
 	router := rg.Group("/dns")
 
 	router.GET("/Query/:query", dc.dnsController.Query())
+	router.GET("/:query", dc.dnsController.Relay())
 
 	// router.POST("/cli", rc.authController.Cli())
-
 }

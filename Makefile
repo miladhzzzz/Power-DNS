@@ -5,8 +5,8 @@ up:
 
 # down: destroy the docker files
 down:
-	docker-compose 
-	
+	docker-compose down
+
 # bin: build the server  and output to .bin dir
 bin:
 	cd cmd && go build -o ../.bin/server

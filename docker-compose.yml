@@ -1,6 +1,6 @@
 version: '3.9'
 services:
-  dns-server:
+  power-dns:
     build:
       context: .
       dockerfile: Dockerfile

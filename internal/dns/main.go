@@ -16,7 +16,7 @@ import (
 )
 
 var (
-	localPort = 53 // local port DNS server listening on
+	localPort = 5335 // local port DNS server listening on
 
 	relayServer = "https://hans-army-version-raise.trycloudflare.com/dns/Query/" // relayServer address of the relay server you ran
 

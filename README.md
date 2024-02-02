@@ -50,9 +50,9 @@ Start the DNS server:
 ./power-dns
 ````
 
-The DNS server will start listening for DNS queries on port 53 or port 8000 for API queries.
+- The DNS server will start listening for DNS queries on port 53 or port 8000 for API queries.
 
-Use HTTP GET requests to query DNS records via the API endpoints (e.g., /dns/Query/example.com).
+- Use HTTP GET requests to query DNS records via the API endpoints (e.g., /dns/Query/example.com).
 
 Note: The same codebase can be used for both the DNS relay server and the client. When running locally, you can choose to run the server component to provide DNS relay services or run the client component to query DNS records from the relay server.
 
@@ -62,41 +62,41 @@ Note: The same codebase can be used for both the DNS relay server and the client
 
 The project consists of the following main components:
 
-power-dns: The main executable file for running the DNS server.
-dns: Package containing the DNS server implementation.
-cache: Package containing the cache implementation for caching DNS responses.
-api: Package containing API endpoints for custom DNS record management.
-k8s: Package for integrating with Kubernetes (k8s) CoreDNS.
-ebpf: Package for packet flow monitoring and metrics collection with eBPF.
+- power-dns: The main executable file for running the DNS server.
+- dns: Package containing the DNS server implementation.
+- cache: Package containing the cache implementation for caching DNS responses.
+- api: Package containing API endpoints for custom DNS record management.
+- k8s: Package for integrating with Kubernetes (k8s) CoreDNS.
+- ebpf: Package for packet flow monitoring and metrics collection with eBPF.
 
 ### Dependencies
 
 The project relies on the following external dependencies:
 
-github.com/miekg/dns: Package for DNS message handling and server implementation.
-github.com/pkg/errors: Package for error handling and wrapping errors.
+- github.com/miekg/dns: Package for DNS message handling and server implementation.
+- github.com/pkg/errors: Package for error handling and wrapping errors.
 
-#### DNS Tunnel Over HTTPS (DoH) Logic
+### DNS Tunnel Over HTTPS (DoH) Logic
 
 The DNS server handles incoming DNS queries and forwards them to the relay server via HTTP GET requests. It supports local DNS caching on both the client and server sides to optimize performance.
 
-#### API Endpoints
+### API Endpoints
 
 The project exposes API endpoints for managing custom DNS records, including adding, deleting, and showing DNS records in the hosts file of the server.
 
-#### Kubernetes (k8s) Integration
+### Kubernetes (k8s) Integration
 
 Integration with Kubernetes (k8s) CoreDNS enables the resolution of local names to services within Kubernetes clusters.
 
-#### Packet Flow Monitoring and Metrics with eBPF
+### Packet Flow Monitoring and Metrics with eBPF
 
 The project utilizes eBPF for packet flow monitoring and metrics collection, allowing for network traffic analysis, performance monitoring, and troubleshooting.
 
-#### Dynamic Routing Methods
+### Dynamic Routing Methods
 
 The DNS server employs dynamic routing methods using eBPF, allowing for flexible and efficient routing of DNS traffic based on various criteria such as source, destination, and protocol.
 
-#### Failover Mechanisms
+### Failover Mechanisms
 
 The project includes failover mechanisms such as cache, switching to plain DNS requests, and using the server hosts file to resolve the name, ensuring reliability and availability of DNS resolution services.
 

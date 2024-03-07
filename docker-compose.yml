@@ -14,4 +14,4 @@ services:
     labels:
       - "traefik.http.routers.power-dns.rule=PathPrefix(`/pdns`)"
       - "traefik.http.middlewares.pwer-dns.stripprefix.prefixes=/pdns"
-      - "traefik.http.routers.power-dns.middlewares=power-dns@docker"
+      - "traefik.http.routers.power-dns.middlewares=pwer-dns@docker"

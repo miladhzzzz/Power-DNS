@@ -12,6 +12,7 @@ services:
       - PUBLIC_DOH_SERVER=https://your-public-doh-server
 
     labels:
+      - "traefik.http.services.power-dns.loadbalancer.server.port=8000"
       - "traefik.http.routers.power-dns.rule=PathPrefix(`/pdns`)"
       - "traefik.http.middlewares.pwer-dns.stripprefix.prefixes=/pdns"
       - "traefik.http.routers.power-dns.middlewares=pwer-dns@docker"

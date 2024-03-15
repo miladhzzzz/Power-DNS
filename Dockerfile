@@ -17,4 +17,7 @@ COPY --from=builder /app/cmd/dns-server .
 
 RUN chmod +x ./dns-server
 
+EXPOSE 8000
+EXPOSE 5335
+
 CMD ["./dns-server"]

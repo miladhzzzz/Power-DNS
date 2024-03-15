@@ -4,6 +4,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"fmt"
+	"net"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -34,6 +36,31 @@ func init() {
     server.Use(gin.LoggerWithWriter(logFile))
 }
 
+func getContainerIP() (string, error) {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return "", fmt.Errorf("failed to get network interfaces: %v", err)
+	}
+
+	for _, iface := range interfaces {
+		if iface.Name == "eth0" || iface.Name == "eth1" {
+			addrs, err := iface.Addrs()
+			if err != nil {
+				return "", fmt.Errorf("failed to get addresses for interface %s: %v", iface.Name, err)
+			}
+
+			for _, addr := range addrs {
+				ipNet, ok := addr.(*net.IPNet)
+				if ok && !ipNet.IP.IsLoopback() && ipNet.IP.To4() != nil {
+					return ipNet.IP.String(), nil
+				}
+			}
+		}
+	}
+
+	return "", fmt.Errorf("IP address not found")
+}
+
 func StartGinAPI() {
 	r := server.Group("")
 
@@ -49,5 +76,12 @@ func StartGinAPI() {
 
 	DNSRouteController.DNSRoute(r)
 
-	log.Fatal(server.Run(":8000"))
+	container_ip, err := getContainerIP()
+
+	if err != nil{
+		fmt.Printf("did not find the container ip")
+		log.Fatal(server.Run(":8000"))
+	}
+
+	log.Fatal(server.Run(container_ip + ":8000"))
 }

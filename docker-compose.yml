@@ -18,8 +18,8 @@ services:
       - "traefik.http.routers.power-dns.middlewares=pwer-dns@docker"
 
     networks:
-      - prod-auto-inet
+      - prod-automation_prod-auto-inet
 
 networks:
-  prod-auto-inet:
+  prod-automation_prod-auto-inet:
     external: true

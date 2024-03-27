@@ -1,18 +1,18 @@
 package dns
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"bytes"
 	"net"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/miekg/dns"
-	
+
 )
 
 var (
@@ -327,29 +327,28 @@ func (h *DnsHandler) httpDNSrelay(req string) (*dns.Msg, error) {
 func (h *DnsHandler) forwardDNSOverHttps(req string) (*dns.Msg, error) {
 	// Create HTTP client for DoH server
 	client := &http.Client{}
-	domain := req + "."
-	// Create DNS message
-	dnsMsg := new(dns.Msg)
-	dnsMsg.SetQuestion(domain, dns.TypeA) // Assuming it's an A record query
 
-	// Encode DNS request to wire format
+	// Construct DNS question
+	dnsMsg := new(dns.Msg)
+	dnsMsg.SetQuestion(req+".", dns.TypeA) // Assuming it's an A record query
+
+	// Encode DNS message to wire format
 	reqData, err := dnsMsg.Pack()
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode DNS request: %w", err)
 	}
 
-	// Encode DNS wire format to base64url
-	encodedReq := base64.RawURLEncoding.EncodeToString(reqData)
-
-	// Construct JSON object with DNS query
-	jsonReq := fmt.Sprintf(`{"dns":"%s"}`, encodedReq)
-
 	// Send DNS request to DoH server
-	resp, err := client.Post(h.dohServer, "application/dns-message", strings.NewReader(jsonReq))
+	resp, err := client.Post(h.dohServer, "application/dns-message", bytes.NewReader(reqData))
 	if err != nil {
 		return nil, fmt.Errorf("failed to send DNS request: %w", err)
 	}
 	defer resp.Body.Close()
+
+	// Check for non-200 status code
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code received: %d", resp.StatusCode)
+	}
 
 	// Read response body
 	respBody, err := io.ReadAll(resp.Body)
@@ -365,4 +364,3 @@ func (h *DnsHandler) forwardDNSOverHttps(req string) (*dns.Msg, error) {
 
 	return respMsg, nil
 }
-

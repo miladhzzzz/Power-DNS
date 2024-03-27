@@ -45,7 +45,7 @@ go build
 Start the DNS server:
 ````
 
-````shell
+````sh
 
 ./power-dns
 ````

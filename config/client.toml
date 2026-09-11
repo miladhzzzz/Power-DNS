@@ -1,0 +1,34 @@
+mode = "client"
+
+[log]
+level = "info"
+format = "json"
+
+[dns_server]
+listen_addr = "0.0.0.0:5335"
+
+[api]
+listen_addr = "0.0.0.0:8000"
+records_path_prefix = "/api/v1/records"
+
+[cache]
+enabled = true
+persist_path = "/app/data/cache.gob"
+
+[records]
+enabled = true
+path = "/app/data/records.json"
+
+[relay]
+url = "http://power-dns-relay:8000/dns-query"
+# dot_addr = "power-dns-relay:853" # set this too (or instead) if the relay's DoT listener is enabled
+timeout_seconds = 5
+
+[upstream]
+doh_servers = ["https://dns.google/dns-query"]
+dot_servers = ["1.1.1.1:853"]
+plain_servers = ["1.1.1.1:53"]
+timeout_seconds = 3
+
+[resolution]
+order = ["records", "cache", "relay", "doh", "dot", "plain"]

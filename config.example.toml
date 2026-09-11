@@ -1,0 +1,105 @@
+# Power-DNS v2 example configuration.
+#
+# Copy this to config.toml and adjust for your deployment, then run:
+#   ./power-dns -config config.toml
+#
+# There are two roles, controlled by `mode`:
+#   - "relay":  the public-facing endpoint, deployed somewhere with
+#               unrestricted DNS access. Speaks RFC 8484 DoH and, if
+#               configured, RFC 7858 DoT.
+#   - "client": the local resolver you point your devices at. Tries local
+#               records, then cache, then the relay, then falls back to
+#               direct DoH / DoT / plain DNS if the relay is unreachable.
+#   - "both":   runs both roles in one process (handy for local dev/testing,
+#               or a single-box deployment).
+#
+# DoH and DoT are two independent transports for the same client<->relay
+# link: a network that blocks one may not block the other, so running both
+# gives you two independent chances to get through.
+
+mode = "client"
+
+[log]
+level = "info"   # debug | info | warn | error
+format = "text"  # text | json
+
+# The local DNS listener(s) clients on your network query (client/both mode).
+[dns_server]
+listen_addr = "127.0.0.1:5335" # UDP + TCP
+
+# Optionally also expose this client's local resolver over DoT, e.g. for LAN
+# devices that speak DoT natively. Leave listen_addr empty to disable.
+[dns_server.dot]
+listen_addr = ""
+cert_file = ""
+key_file = ""
+
+# The HTTP API: health check, metrics, the DoH relay endpoint (relay/both
+# mode), and the records-management API.
+[api]
+listen_addr = "127.0.0.1:8000"
+relay_path = "/dns-query"
+records_path_prefix = "/api/v1/records"
+
+# The relay's DoT endpoint (relay/both mode), alongside the DoH endpoint
+# above. Requires a real certificate for production use -- clients (and
+# most DoT resolvers) verify it. Leave listen_addr empty to run DoH only.
+[api.relay_dot]
+listen_addr = "" # e.g. "0.0.0.0:853"
+cert_file = ""   # e.g. "/etc/letsencrypt/live/your-domain/fullchain.pem"
+key_file = ""    # e.g. "/etc/letsencrypt/live/your-domain/privkey.pem"
+
+# The answer cache. TTLs are taken from real upstream answers and clamped to
+# [min_ttl_seconds, max_ttl_seconds].
+[cache]
+enabled = true
+max_entries = 10000
+min_ttl_seconds = 30
+max_ttl_seconds = 3600
+negative_ttl_seconds = 30
+persist_path = "" # e.g. "cache.gob" to survive restarts
+
+# Local authoritative overrides -- the "custom DNS record management"
+# feature. Manage records via the [api] records_path_prefix REST API:
+#   curl -X POST localhost:8000/api/v1/records \
+#     -d '{"name":"grafana.internal","type":"A","value":"10.0.0.5","ttl":300}'
+[records]
+enabled = true
+path = "records.json"
+
+# Where the client sends queries first, before falling back to direct
+# DoH/DoT/plain DNS. Leave both url and dot_addr empty to skip the relay
+# entirely. If both are set, DoH is tried first and DoT is the fallback.
+[relay]
+url = ""      # e.g. "https://your-relay.example.com/dns-query"
+dot_addr = "" # e.g. "your-relay.example.com:853"
+timeout_seconds = 5
+auth_token = "" # must match [security].relay_auth_token on the relay; DoH only
+
+# Fallback upstreams, used directly (bypassing the relay) if the relay is
+# unreachable, and used by the relay itself to resolve real queries.
+[upstream]
+doh_servers = ["https://dns.google/dns-query", "https://cloudflare-dns.com/dns-query"]
+dot_servers = ["1.1.1.1:853", "8.8.8.8:853"]
+plain_servers = ["1.1.1.1:53", "8.8.8.8:53"]
+timeout_seconds = 3
+
+# The order resolution strategies are tried in. Valid entries: records,
+# cache, relay, doh, dot, plain. The first to produce an answer wins.
+[resolution]
+order = ["records", "cache", "relay", "doh", "dot", "plain"]
+
+[security]
+# Require "Authorization: Bearer <token>" on the relay's DoH endpoint. Leave
+# empty to run an open relay (fine for a private/trusted deployment). Note
+# this only applies to DoH -- DoT has no header to carry it (see DoTServer's
+# doc comment in internal/relay/dotserver.go for how to restrict DoT access).
+relay_auth_token = ""
+# Require "Authorization: Bearer <token>" on the records-management API.
+admin_auth_token = ""
+# Restrict the relay to only resolving names under these suffixes. Empty
+# means resolve anything (a general-purpose DoH/DoT relay).
+allowed_domains = []
+# Per-source-IP rate limit on the relay endpoint (DoH and DoT both). 0
+# disables it.
+relay_rate_limit_per_minute = 600

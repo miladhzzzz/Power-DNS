@@ -1,115 +1,147 @@
-# Power-DNS Documentation
+# Power-DNS v2
 
-This documentation provides an overview of the Power-DNS project, which enables DNS resolution over HTTPS for users in regions with restricted access to DNS-over-HTTPS services. The project includes features such as DNS caching, custom DNS record management via API, integration with Kubernetes (k8s) CoreDNS, packet flow monitoring with eBPF (Extended Berkeley Packet Filter), dynamic routing methods, failover mechanisms, and metrics and monitoring capabilities.
+Power-DNS relays DNS resolution over an encrypted transport for people on
+networks where DNS-over-HTTPS (or DNS-over-TLS) is blocked or throttled. You
+run a **relay** somewhere with unrestricted DNS access; your **client** runs
+locally and forwards its queries to the relay over DoH and/or DoT --
+whichever transport your network doesn't block.
 
-## Table of Contents
+This is a from-scratch v2 of the original project. It keeps the same goal
+but replaces most of the implementation. See [CHANGES.md](./CHANGES.md) for
+a detailed list of what changed and why -- this file covers what v2 *is* and
+how to run it.
 
-1. [Introduction](#introduction)
-2. [Features](#features)
-3. [Usage](#usage)
-4. [Implementation Details](#implementation-details)
-5. [Running in Different Environments](#running-in-different-environments)
-6. [Contributing](#contributing)
-7. [License](#license)
+## How it works
 
-## Introduction
+```
+your device --DNS--> power-dns client --DoH and/or DoT--> power-dns relay --DoH/DoT/DNS--> real internet
+                            |
+                            +-- local records (your own overrides)
+                            +-- cache (TTL-aware)
+                            +-- direct DoH / DoT / plain DNS (if the relay is down)
+```
 
-The Power-DNS project aims to provide a solution for DNS resolution over HTTPS, particularly for users in regions where access to DNS-over-HTTPS services is restricted. By setting up a dedicated server with a DNS relay API, users can query DNS records via HTTP GET requests and receive responses in JSON format. The project also supports local DNS caching, custom DNS record management via API endpoints, integration with Kubernetes (k8s) CoreDNS for resolving local names to services, packet flow monitoring with eBPF, dynamic routing methods, failover mechanisms, and metrics and monitoring capabilities.
+A single binary plays either role, or both, controlled by `mode` in
+`config.toml`:
 
-## Features
+- **`relay`** -- a spec-compliant [RFC 8484](https://datatracker.ietf.org/doc/html/rfc8484)
+  DNS-over-HTTPS server, and optionally an [RFC 7858](https://datatracker.ietf.org/doc/html/rfc7858)
+  DNS-over-TLS server on the same or a different port. Deploy it somewhere
+  with normal internet access, behind whatever TLS-terminating reverse proxy
+  you already run (for DoH) and/or with its own certificate (for DoT, since
+  DoT is raw TLS, not HTTP, so it can't share an HTTP reverse proxy the same
+  way). Because it speaks both protocols exactly to spec, you can also point
+  *any* DoH- or DoT-capable client at it directly (a browser, `systemd-resolved`,
+  `curl`), not just this project's own client.
+- **`client`** -- the resolver you point your devices at. For each query it
+  tries, in order: your own local records, its cache, the relay (DoH, then
+  DoT, if both are configured), then (if the relay is unreachable over
+  either transport) a direct DoH server, a direct DoT server, then plain
+  DNS. The order is configurable.
+- **`both`** -- runs both roles in one process, for local development or a
+  single-box deployment.
 
-- DNS resolution over HTTPS (DoH) using a dedicated server with a DNS relay API.
-- Support for querying DNS records via HTTP GET requests and receiving responses in JSON format.
-- Local DNS caching on the client and server sides to ensure fast responses and reduce the load on upstream DNS servers.
-- Custom DNS record management via API endpoints for adding, deleting, and showing DNS records in the hosts file of the server.
-- Integration with Kubernetes (k8s) CoreDNS to resolve local names to services within Kubernetes clusters.
-- Packet flow monitoring with eBPF for network traffic analysis and debugging.
-- Dynamic routing methods for DNS traffic using eBPF, allowing for flexible and efficient routing based on various criteria.
-- Failover mechanisms including cache, switching to plain DNS requests, and using the server hosts file to resolve the name.
-- Metrics and monitoring capabilities for performance analysis and troubleshooting using eBPF.
+Running DoH and DoT side by side matters because they're blocked
+independently: a network that blocks HTTPS-based DoH may leave port 853 DoT
+alone, and vice versa. If one transport is unreachable, the client
+automatically falls back to the other before giving up.
 
-## Usage
+## Quick start
 
-To use the Power-DNS server, follow these steps:
+```bash
+go build -o power-dns ./cmd/power-dns
+cp config.example.toml config.toml
+# edit config.toml: set mode, and relay.url / relay.dot_addr if running as a client
+./power-dns -config config.toml
+```
 
-1. Clone the repository:
+Or with Docker Compose, which brings up a relay and a client already wired
+together (see `docker-compose.yml` and `config/{relay,client}.toml`):
 
-   ```bash
-   git clone <repository-url>
+```bash
+docker compose up -d --build
+```
 
-2. Build the project:
+### Running as a relay
 
-````shell
-cd power-dns
-go build
-Start the DNS server:
-````
+```toml
+mode = "relay"
+[api]
+listen_addr = "0.0.0.0:8000"
+relay_path = "/dns-query"
 
-````sh
+# Optional: also serve DoT on 853, alongside DoH.
+[api.relay_dot]
+listen_addr = "0.0.0.0:853"
+cert_file = "/etc/letsencrypt/live/your-domain/fullchain.pem"
+key_file = "/etc/letsencrypt/live/your-domain/privkey.pem"
+```
 
-./power-dns
-````
+Put the HTTP side behind TLS (Caddy, Traefik, nginx -- whatever you already
+use) and give your client `https://your-domain/dns-query` as `relay.url`.
+The DoT side terminates its own TLS directly (see `[api.relay_dot]` above),
+since DoT is raw TCP+TLS and generally can't be proxied the same way HTTP
+can. Set `security.relay_auth_token` if you don't want DoH to be a fully
+open relay (DoT has no equivalent -- see the note in
+`internal/relay/dotserver.go`).
 
-- The DNS server will start listening for DNS queries on port 53 or port 8000 for API queries.
+### Running as a client
 
-- Use HTTP GET requests to query DNS records via the API endpoints (e.g., /dns/Query/example.com).
+```toml
+mode = "client"
+[dns_server]
+listen_addr = "0.0.0.0:5335"
+[relay]
+url = "https://your-domain/dns-query" # DoH
+dot_addr = "your-domain:853"          # DoT; tried if DoH fails
+auth_token = "" # must match the relay's relay_auth_token, if set (DoH only)
+```
 
-Note: The same codebase can be used for both the DNS relay server and the client. When running locally, you can choose to run the server component to provide DNS relay services or run the client component to query DNS records from the relay server.
+Point your device or router at `<client-host>:5335` as its DNS server.
 
-## Implementation Details
+### Managing local records
 
-### Project Structure
+The records API is the real implementation of what used to be a promise in
+the v1 README ("custom DNS record management ... in the hosts file"):
 
-The project consists of the following main components:
+```bash
+# Add an override
+curl -X POST localhost:8000/api/v1/records \
+  -d '{"name":"grafana.internal","type":"A","value":"10.0.0.5","ttl":300}'
 
-- power-dns: The main executable file for running the DNS server.
-- dns: Package containing the DNS server implementation.
-- cache: Package containing the cache implementation for caching DNS responses.
-- api: Package containing API endpoints for custom DNS record management.
-- k8s: Package for integrating with Kubernetes (k8s) CoreDNS.
-- ebpf: Package for packet flow monitoring and metrics collection with eBPF.
+# List everything
+curl localhost:8000/api/v1/records
 
-### Dependencies
+# Delete it
+curl -X DELETE 'localhost:8000/api/v1/records?name=grafana.internal&type=A'
+```
 
-The project relies on the following external dependencies:
+Records are checked first, before cache or relay, so they always take
+priority. This also replaces the never-implemented Kubernetes/CoreDNS
+integration: point a small controller (or a shell script, or CoreDNS's own
+`forward` config) at this API to sync Service IPs in, instead of embedding a
+Kubernetes client in Power-DNS itself.
 
-- github.com/miekg/dns: Package for DNS message handling and server implementation.
-- github.com/pkg/errors: Package for error handling and wrapping errors.
+### Metrics
 
-### DNS Tunnel Over HTTPS (DoH) Logic
+`GET /metrics` on the API port exposes Prometheus text-format counters
+(`powerdns_queries_total{strategy=...}`, `powerdns_relay_latency_ms`,
+`powerdns_uptime_seconds`). See [CHANGES.md](./CHANGES.md) for why this
+replaces the originally-planned eBPF metrics.
 
-The DNS server handles incoming DNS queries and forwards them to the relay server via HTTP GET requests. It supports local DNS caching on both the client and server sides to optimize performance.
+## Configuration reference
 
-### API Endpoints
+See the comments in [`config.example.toml`](./config.example.toml) -- every
+field is documented there.
 
-The project exposes API endpoints for managing custom DNS records, including adding, deleting, and showing DNS records in the hosts file of the server.
+## Development
 
-### Kubernetes (k8s) Integration
-
-Integration with Kubernetes (k8s) CoreDNS enables the resolution of local names to services within Kubernetes clusters.
-
-### Packet Flow Monitoring and Metrics with eBPF
-
-The project utilizes eBPF for packet flow monitoring and metrics collection, allowing for network traffic analysis, performance monitoring, and troubleshooting.
-
-### Dynamic Routing Methods
-
-The DNS server employs dynamic routing methods using eBPF, allowing for flexible and efficient routing of DNS traffic based on various criteria such as source, destination, and protocol.
-
-### Failover Mechanisms
-
-The project includes failover mechanisms such as cache, switching to plain DNS requests, and using the server hosts file to resolve the name, ensuring reliability and availability of DNS resolution services.
-
-## Running in Different Environments
-
-The project provides scripts and documentation for running the DNS relay server on different environments, including Kubernetes and various cloud providers. Additionally, you can run the entire system, including both the server/relay and client components, in a Docker container for easy deployment and management.
-
-## Contributing
-
-Contributions to the Power-DNS project are welcome! Feel free to submit bug reports, feature requests, or pull requests via the project repository on GitHub.
+```bash
+make build   # go build
+make test    # go test ./...
+make vet     # go vet ./...
+```
 
 ## License
 
-This project is licensed under the MIT License. See the LICENSE file for details.
-a
-a
+MIT. See [LICENSE](./LICENSE).

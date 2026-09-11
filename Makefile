@@ -1,17 +1,29 @@
-# up: run docker-compose up -d
-up:
-	docker-compose build
-	docker-compose up -d
+BINARY := power-dns
+PKG := ./cmd/power-dns
 
-# down: destroy the docker files
-down:
-	docker-compose down
+.PHONY: build run test vet fmt lint docker-up docker-down clean
 
-# bin: build the server  and output to .bin dir
-bin:
-	cd cmd && go build -o ../.bin/server
+build:
+	go build -trimpath -o bin/$(BINARY) $(PKG)
 
-# run: runs the binary localy linux
-run:
-	chmod +x .bin/server
-	./.bin/server
+run: build
+	./bin/$(BINARY) -config config.toml
+
+test:
+	go test ./...
+
+vet:
+	go vet ./...
+
+fmt:
+	gofmt -l .
+
+docker-up:
+	docker compose build
+	docker compose up -d
+
+docker-down:
+	docker compose down
+
+clean:
+	rm -rf bin

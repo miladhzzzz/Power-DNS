@@ -1,0 +1,192 @@
+# What changed in v2, and why
+
+v1's [README](https://github.com/miladhzzzz/power-dns) promised a lot:
+DoH relaying, caching, custom-record management with hosts-file integration,
+Kubernetes/CoreDNS integration, eBPF packet monitoring and dynamic routing,
+and failover. Reading the actual code, most of that was either partially
+built, silently broken, or not implemented at all (`internal/k8s` and
+`internal/ebpf` were empty packages). v2 is a rewrite that keeps the goal --
+give people on DoH-restricted networks a working relay -- and either
+properly implements or deliberately drops each promise, explained below.
+
+## DoT (DNS-over-TLS) sits alongside DoH
+
+v1 had no transport but its own bespoke JSON-over-HTTP protocol, and the
+initial v2 rewrite added a spec-compliant DoH relay but still only one
+transport for the client<->relay link. Since different networks block
+different things -- some block HTTPS-based DoH, some block TLS-on-853 DoT,
+rarely both -- v2 now speaks both:
+
+- `internal/relay.DoTServer` runs an [RFC 7858](https://www.rfc-editor.org/rfc/rfc7858)
+  DNS-over-TLS listener alongside the existing DoH `Server`, sharing the
+  same allow-list, rate limiter, and upstream resolution via a common
+  `resolve()` helper -- so both transports enforce identical policy. It
+  needs its own certificate (DoT is raw TCP+TLS, not HTTP, so it generally
+  can't be terminated by the same reverse proxy fronting the DoH endpoint).
+- `internal/relay.Client` (what the client uses to reach its relay) now
+  tries DoH first and falls back to DoT if configured, so a blocked
+  transport doesn't take the whole client<->relay link down.
+- `internal/upstream.DoTClient` adds direct DoT resolution (bypassing the
+  relay entirely) as a fourth fallback strategy, alongside records, cache,
+  relay, and DoH -- `internal/upstream.Chain` now tries DoH, then DoT, then
+  plain DNS when resolving real queries.
+- `internal/dnsserver` can also expose the *client's* local resolver over
+  DoT (`[dns_server.dot]`), for LAN devices that speak DoT natively, in
+  addition to the existing plain UDP/TCP listener.
+
+One limitation worth calling out: the DoH endpoint's bearer-token auth
+(`security.relay_auth_token`) has no DoT equivalent, since DoT is raw TLS
+with no header to carry it in. If you need to restrict who can use your
+relay's DoT endpoint, do it at the network layer (firewall by source IP) or
+require mutual TLS -- `internal/relay/dotserver.go`'s doc comment has
+details. The domain allow-list and rate limiter both still apply to DoT,
+keyed by the connecting IP.
+
+## The core relay protocol was rebuilt
+
+**v1:** the relay spoke a bespoke protocol: the client did an HTTP `GET
+/dns/Query/<domain>` (or the standalone `HttpQuery`/`HttpRelay` methods hit
+`GET <relayURL><domain>`), and the relay replied with hand-rolled JSON:
+```json
+{"domain": "example.com", "response": {"answer": [{"Hdr": {...}, "A": "1.2.3.4"}]}}
+```
+That shape only has a field for `A` records. AAAA, CNAME, MX, TXT, NS -- any
+other record type -- had nowhere to go; `localDNSrelay`/`httpDNSrelay` in
+`internal/dns/main.go` only ever built `*dns.A` answers. Queries also always
+hardcoded `dns.TypeA` when going through `forwardDNSOverHttps`, regardless of
+what the client actually asked for. There was no timeout on any HTTP call,
+so a hung relay meant a hung DNS query, forever.
+
+**v2:** the relay carries full DNS wire format (what `(*dns.Msg).Pack()`
+already produces) over HTTP, exactly as [RFC 8484](https://www.rfc-editor.org/rfc/rfc8484)
+specifies: GET with a base64url `?dns=` parameter, or POST with
+`Content-Type: application/dns-message`. Every record type round-trips
+intact because nothing is re-interpreted in the middle. This also means the
+relay endpoint is a real, spec-compliant DoH server -- any DoH client
+(browsers, `systemd-resolved`, `curl`) can use it, not just this project's
+own client. Every relay/DoH/plain call now has an explicit timeout
+(`relay.timeout_seconds`, `upstream.timeout_seconds`).
+
+See `internal/wire/`, `internal/relay/`, `internal/upstream/`.
+
+## The cache had no bound, no real TTLs, and a write race
+
+**v1** (`internal/dns/cache.go`): every cached response used a single fixed
+24h expiry (`NewCache(24*time.Hour, ...)`) regardless of what TTL the actual
+DNS answer carried. There was no size limit -- the map just grows forever.
+Worse, `Set`/`Delete` launched `go c.saveToFile()` on every single call:
+`saveToFile` takes the same mutex `Set`/`Delete` already released, so under
+load you get a pile of goroutines all fighting to serialize the whole cache
+to disk on every write, with no ordering guarantee about which write wins.
+
+**v2** (`internal/cache/`): TTL comes from the real answer (clamped to
+`min_ttl_seconds`/`max_ttl_seconds`), negative answers (NXDOMAIN/SERVFAIL)
+are cached briefly too (`negative_ttl_seconds`), the cache is a bounded
+LRU (`max_entries`), and persistence is a periodic snapshot
+(`StartPersistLoop`, every 5 minutes plus on shutdown) instead of a
+write-amplifying goroutine per mutation.
+
+## The DNS server dropped queries and never stopped cleanly
+
+**v1** (`internal/dns/main.go`, `ServeDNS`): if both the relay and the plain
+DNS fallback failed, the handler just `return`ed -- no response was ever
+written back to the client, which means the client sits there until its own
+timeout instead of getting an immediate SERVFAIL. The server only listened
+on UDP (no TCP, needed for large/truncated responses). Shutdown was a bare
+`select {}` with no signal handling, so the process could never be stopped
+gracefully; a `defer` meant to save the cache and shut the server down could
+only ever run if `StartDNSserver` returned, which it structurally never did.
+
+**v2** (`internal/dnsserver/`): `Resolver.Resolve` always returns a message,
+falling back to `SERVFAIL` if every strategy fails, so clients get a fast,
+correct answer either way. Both UDP and TCP listeners run. `main.go` uses
+`signal.NotifyContext` for SIGINT/SIGTERM and shuts every component down via
+context cancellation.
+
+## Custom record management and "Kubernetes integration" didn't exist
+
+**v1**'s README promised "custom DNS record management via API endpoints
+for adding, deleting, and showing DNS records in the hosts file" and
+"integration with Kubernetes (k8s) CoreDNS to resolve local names to
+services." Neither existed: there was no hosts-file code anywhere, and
+`internal/k8s/client.go` was a one-line empty package.
+
+**v2** actually implements the record-management half: `internal/records/`
+is a small JSON-backed CRUD store, exposed over `/api/v1/records`
+(GET/POST/DELETE), and checked first by the resolver so local overrides
+always win. Rather than embed a bespoke Kubernetes client (which would need
+in-cluster credentials and RBAC just to demo), v2 treats this API as the
+integration point: anything that can watch Kubernetes Services and make an
+HTTP call -- a small controller, a cron job, CoreDNS's own config -- can
+push records in. Less code, works outside Kubernetes too, and is testable
+without a cluster (see `internal/records/store_test.go`).
+
+## eBPF metrics were replaced with a real, working metrics endpoint
+
+**v1**'s README describes "packet flow monitoring with eBPF," "dynamic
+routing methods using eBPF," and "metrics and monitoring capabilities ...
+using eBPF" -- but `internal/ebpf` was an empty package; none of this was
+built. Kernel-level packet tracing also needs elevated privileges and is
+awkward to run portably (containers, non-Linux hosts), for a userspace
+HTTP/DNS relay where the actually-useful signal is "which strategy answered
+this query and how long did it take," not raw packet flow.
+
+**v2** drops eBPF and exposes real counters and a latency histogram in
+standard Prometheus text format at `/metrics`
+(`powerdns_queries_total{strategy=...}`, `powerdns_relay_latency_ms`,
+`powerdns_uptime_seconds`) -- see `internal/metrics/`. Zero extra
+dependencies, zero extra privileges, works anywhere Go runs.
+
+## Configuration was hardcoded; now it's a real config file
+
+**v1** hardcoded the relay URL, the DoH server, the listen port, and the
+cache file path directly as package-level `var`s in
+`internal/dns/main.go` (including a personal path, `/home/milx/cache.gob`,
+and a specific `trycloudflare.com` tunnel URL). `config/config.go` existed
+but was an empty package -- `config.toml`/`config.toml.example` were present
+in the repo but nothing ever read them. `docker-compose.yml` set a
+`PUBLIC_DOH_SERVER` environment variable that, likewise, nothing read.
+
+**v2** (`internal/config/`) loads everything from `config.toml`, with
+defaults for anything you omit, and validates the result on startup (e.g.
+refusing to start a client with an empty relay URL without at least warning
+you why every query will fall through to direct DoH/plain DNS).
+
+## The HTTP API no longer needs Gin, or a network-interface scan
+
+**v1** (`internal/api/server.go`) used Gin + `gin-contrib/cors` for two
+routes, and guessed its own bind address by scanning for `eth0`/`eth1`
+network interfaces (`getContainerIP`) instead of just binding an address
+from config -- which silently falls back to `:8000` on any host where that
+guess fails (e.g. anything not named `eth0`/`eth1`, common outside default
+Docker networking). It also opened `DNS-HTTP.log` once at `init()` time with
+no rotation.
+
+**v2** (`internal/api/`) uses the standard library's `net/http.ServeMux`
+(pattern-based routing has been built into Go's stdlib since 1.22), binds
+whatever `api.listen_addr` says, and logs through `log/slog`. One fewer
+dependency, no interface-scanning heuristics.
+
+## Security: the original was an open, unauthenticated relay
+
+**v1** had no authentication anywhere and no rate limiting -- anyone who
+found the relay's tunnel URL could use it as an open DNS proxy indefinitely.
+
+**v2** adds three optional, off-by-default controls: a bearer token for the
+relay endpoint (`security.relay_auth_token`), a bearer token for the
+records-management API (`security.admin_auth_token`), and a per-source-IP
+rate limit on the relay (`security.relay_rate_limit_per_minute`). You can
+still run a fully open relay by leaving these blank, but now it's a choice.
+
+## Smaller fixes
+
+- `scripts/relay.sh` had two shell syntax errors (`if! command` and `cd..`,
+  both missing a space) that would fail immediately on `bash scripts/relay.sh`.
+  v2's version (`set -euo pipefail`, correct syntax) actually runs, and
+  prints the resulting DoH URL instead of dumping a raw log file.
+- The `Dockerfile` builds with a non-root user and a `HEALTHCHECK` hitting
+  `/healthz`, instead of running the server as root with no health signal.
+- Dependencies dropped: `gin-gonic/gin`, `gin-contrib/cors`. Kept/added:
+  `miekg/dns` (DNS message handling and, via its `tcp-tls` transport, DoT
+  client/server support -- no extra dependency needed) and `BurntSushi/toml`
+  (config parsing, zero transitive dependencies).

@@ -1,0 +1,32 @@
+mode = "relay"
+
+[log]
+level = "info"
+format = "json"
+
+[api]
+listen_addr = "0.0.0.0:8000"
+relay_path = "/dns-query"
+records_path_prefix = "" # relay doesn't need the records API
+
+# Uncomment and point at a real certificate to also serve DoT on :853.
+# [api.relay_dot]
+# listen_addr = "0.0.0.0:853"
+# cert_file = "/etc/letsencrypt/live/your-domain/fullchain.pem"
+# key_file = "/etc/letsencrypt/live/your-domain/privkey.pem"
+
+[cache]
+enabled = false
+
+[records]
+enabled = false
+
+[upstream]
+doh_servers = ["https://dns.google/dns-query", "https://cloudflare-dns.com/dns-query"]
+dot_servers = ["1.1.1.1:853", "8.8.8.8:853"]
+plain_servers = ["1.1.1.1:53", "8.8.8.8:53"]
+timeout_seconds = 3
+
+[security]
+relay_auth_token = "" # set this to a real secret before deploying publicly
+relay_rate_limit_per_minute = 600

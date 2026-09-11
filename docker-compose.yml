@@ -1,26 +1,42 @@
-version: '3.9'
+version: "3.9"
+
+# Example deployment: a relay (deploy this on a host with unrestricted DNS
+# access) and a client (deploy this wherever DoH is restricted, pointed at
+# the relay). Adjust config/*.toml before using in production, and put a
+# real domain + TLS termination (e.g. Traefik/Caddy) in front of the relay --
+# this compose file deliberately does not include TLS, since it's usually
+# handled by whatever reverse proxy already fronts your other services.
+
 services:
-  power-dns:
+  power-dns-relay:
     build:
       context: .
       dockerfile: Dockerfile
-    ports: []
-      # - "5335:5335/udp"
-      # - "5335:5335/tcp"
-      # - "8000:8000"
-    environment:
-      - PUBLIC_DOH_SERVER=https://your-public-doh-server
+    volumes:
+      - ./config/relay.toml:/app/config.toml:ro
+      # If you enable [api.relay_dot] in config/relay.toml, mount your
+      # certificate/key here too and reference them by their in-container
+      # paths, e.g.:
+      # - ./certs:/app/certs:ro
+    ports:
+      - "8000:8000" # put a TLS-terminating reverse proxy in front of this in production
+      - "853:853"   # only needed if [api.relay_dot] is enabled
+    restart: unless-stopped
 
-    labels:
-      - "traefik.enable=true"    
-      - "traefik.http.services.power-dns.loadbalancer.server.port=8000"
-      - "traefik.http.routers.power-dns.rule=PathPrefix(`/pdns`)"
-      - "traefik.http.middlewares.pwer-dns.stripprefix.prefixes=/pdns"
-      - "traefik.http.routers.power-dns.middlewares=pwer-dns@docker"
+  power-dns-client:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./config/client.toml:/app/config.toml:ro
+      - power-dns-client-data:/app/data
+    ports:
+      - "127.0.0.1:5335:5335/udp"
+      - "127.0.0.1:5335:5335/tcp"
+      - "127.0.0.1:8001:8000"
+    depends_on:
+      - power-dns-relay
+    restart: unless-stopped
 
-    networks:
-      - prod-automation_prod-auto-inet
-
-networks:
-  prod-automation_prod-auto-inet:
-    external: true
+volumes:
+  power-dns-client-data:

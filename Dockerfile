@@ -1,23 +1,32 @@
-FROM golang:1.21-alpine as builder
+# syntax=docker/dockerfile:1
+FROM golang:1.22-alpine AS builder
 
-WORKDIR /app
+WORKDIR /src
 
-COPY go.mod .
-COPY go.sum .
+COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN cd cmd && go build -o dns-server
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/power-dns ./cmd/power-dns
 
-FROM alpine:latest as server
+FROM alpine:3.19 AS runtime
+
+RUN apk add --no-cache ca-certificates && \
+    adduser -D -H -u 10001 powerdns
 
 WORKDIR /app
+COPY --from=builder /out/power-dns .
+COPY config.example.toml ./config.toml
 
-COPY --from=builder /app/cmd/dns-server .
-
-RUN chmod +x ./dns-server
+RUN chown -R powerdns:powerdns /app
+USER powerdns
 
 EXPOSE 8000
-EXPOSE 5335
+EXPOSE 853
+EXPOSE 5335/udp
+EXPOSE 5335/tcp
 
-CMD ["./dns-server"]
+HEALTHCHECK --interval=30s --timeout=3s CMD wget -qO- http://127.0.0.1:8000/healthz || exit 1
+
+ENTRYPOINT ["./power-dns"]
+CMD ["-config", "config.toml"]

@@ -1,0 +1,39 @@
+# Persys Cloud Monitoring Stack
+
+services:
+  # --- Prometheus (Metrics collection) ---
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    ports:
+      - "9090:9090"
+
+
+  # --- Grafana (Metrics visualization) ---
+  grafana:
+    image: grafana/grafana:latest
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - grafana_data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GF_SECURITY_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=${GF_USERS_ALLOW_SIGN_UP:-false}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
+# --- Volumes for persistent data ---
+volumes:
+  prometheus_data:
+  grafana_data:

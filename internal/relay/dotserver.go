@@ -67,18 +67,19 @@ func (d *DoTServer) Run(ctx context.Context, addr string) error {
 }
 
 func (d *DoTServer) handle(w dns.ResponseWriter, req *dns.Msg) {
-	if d.limiter != nil && !d.limiter.Allow(peerIP(w.RemoteAddr())) {
+	origin := peerIP(w.RemoteAddr())
+	if d.limiter != nil && !d.limiter.Allow(origin) {
 		_ = w.WriteMsg(refused(req))
 		return
 	}
 
-	respMsg, err := d.resolve(context.Background(), req, "dot")
+	respMsg, err := d.resolve(context.Background(), req, "dot", origin)
 	if err != nil {
 		_ = w.WriteMsg(refused(req))
 		return
 	}
 	if writeErr := w.WriteMsg(respMsg); writeErr != nil {
-		d.log().Warn("failed to write dot response", "error", writeErr)
+		d.log().Warn("failed to write dot response", "origin", origin, "error", writeErr)
 	}
 }
 

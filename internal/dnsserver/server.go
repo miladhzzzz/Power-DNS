@@ -92,9 +92,13 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 func (s *Server) handle(w dns.ResponseWriter, req *dns.Msg) {
-	resp := s.Resolver.Resolve(context.Background(), req)
+	origin := ""
+	if addr := w.RemoteAddr(); addr != nil {
+		origin = addr.String()
+	}
+	resp := s.Resolver.Resolve(context.Background(), req, origin)
 	if err := w.WriteMsg(resp); err != nil {
-		s.log().Warn("failed to write dns response", "error", err)
+		s.log().Warn("failed to write dns response", "origin", origin, "error", err)
 	}
 }
 

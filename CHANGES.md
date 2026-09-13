@@ -42,6 +42,174 @@ require mutual TLS -- `internal/relay/dotserver.go`'s doc comment has
 details. The domain allow-list and rate limiter both still apply to DoT,
 keyed by the connecting IP.
 
+## Debug-level tracing: origin and resolution path, cache hit/miss metrics
+
+Once DoH and DoT were both in place, tracing *why* a given query resolved
+the way it did -- which strategy answered it, for which client, and whether
+the cache actually helped -- needed its own logging, separate from the
+Info-level lifecycle/failure logs already in place:
+
+- `resolver.Resolve` now takes an `origin` (the querying client's address)
+  and logs, at Debug level only, every strategy it tries for a query, why a
+  strategy was skipped or failed, and which one ultimately answered (the
+  `route` field) with how long the whole resolution took. At Info level and
+  above, none of this appears -- only service lifecycle events and genuine
+  failures do, so normal operation doesn't get a log line per query.
+- The relay's `Server.resolve` (shared by both the DoH and DoT endpoints)
+  logs the same shape at Debug level: origin, transport (`doh`/`dot`),
+  qname/qtype, and duration for every query it resolves; failures still log
+  at Warn since those indicate a real problem regardless of log level.
+- `internal/metrics` gained two dedicated counters,
+  `powerdns_cache_hits_total` and `powerdns_cache_misses_total`, alongside
+  the existing per-strategy `powerdns_queries_total`. These increment on
+  every cache lookup the "cache" strategy actually performs, independent of
+  which strategy ultimately answers the query -- so they reflect real cache
+  effectiveness even when, say, local records end up answering instead.
+
+## An unconfigured relay is a valid, disabled state -- not a startup error
+
+Previously, running the client with both `relay.url` and `relay.dot_addr`
+empty caused `Config.Validate` to return an error, which `cmd/power-dns`
+treats as fatal (the process refuses to start). That's backwards: an
+unconfigured relay is a perfectly normal way to run Power-DNS as a plain
+DoH/DoT/plain-DNS forwarder with no relay hop at all -- it shouldn't require
+`config.toml` to lie about a relay it doesn't have.
+
+`Config.Validate` no longer errors on this. A new `Config.RelayDisabled()`
+helper reports whether the relay is unconfigured; `cmd/power-dns` uses it to
+skip constructing a `relay.Client` and logs one Info-level line
+("relay is disabled ... queries will use doh/dot/plain fallback directly")
+instead. `resolver.Resolve` also skips the `relay` strategy silently (no log
+line at all, since it's an intentionally disabled feature, not a failure)
+whenever `RelayClient` is nil, rather than logging a "strategy failed" line
+on every single query.
+
+## Request coalescing extended to the relay itself
+
+The first round of coalescing metrics only covered `internal/resolver`'s
+client-side fallback chain. That left exactly the scenario that originally
+motivated coalescing -- many clients hitting one relay for the same
+freshly-expired domain at once -- uncovered, since `internal/relay.Server`
+had no coalescing at all, only latency instrumentation
+(`ObserveRelayServerLatency`). This closes that gap:
+
+- `internal/relay.Server` now coalesces concurrent DoH/DoT requests for the
+  same (qname, qtype) into a single call to `Upstream.Resolve`, using the
+  same hand-rolled in-flight-map pattern as `internal/resolver` (for the
+  same reason: precise calls-vs-coalesced partitioning isn't possible with
+  `golang.org/x/sync/singleflight`'s shared `shared` flag). Coalescing spans
+  both transports -- a DoH request and a DoT request for the same domain
+  arriving at the same instant share one upstream resolution.
+- New metrics: `powerdns_relay_calls_total`, `powerdns_relay_coalesced_total`,
+  and `powerdns_relay_coalesce_rate`, mirroring the client-side
+  `powerdns_upstream_*` metrics but unlabeled (relay-side coalescing isn't
+  broken out by upstream path, since it coalesces the whole
+  `Upstream.Resolve` call, which may itself try doh/dot/plain internally).
+- Verified with the same style of concurrency test used for the client
+  side: 20 goroutines issuing DoH requests for the same domain against a
+  relay backed by a slow fake upstream produce exactly
+  `powerdns_relay_calls_total 1` and `powerdns_relay_coalesced_total 19`,
+  with every caller's response correctly re-stamped with its own request
+  Id.
+
+## Metrics for prefetching and request coalescing
+
+Prefetching and request coalescing (added just above) shipped without any
+way to see them actually working -- you could infer their effects
+indirectly (lower tail latency, fewer upstream calls) but nothing surfaced
+the mechanisms themselves. This closes that gap:
+
+- **Coalescing got `powerdns_upstream_calls_total{path=...}`,
+  `powerdns_upstream_coalesced_total{path=...}`, and a computed
+  `powerdns_upstream_coalesce_rate{path=...}`.** Getting this right forced a
+  design change: `internal/resolver.Resolver` no longer uses
+  `golang.org/x/sync/singleflight`. That package reports the same `shared`
+  bool to *every* caller in a coalesced group -- including whichever one
+  actually executed the call -- so there's no way to tell, from a single
+  caller's perspective, "was I the one who made the real network call, or
+  did I just ride along." Counting "calls" and "coalesced" as a clean
+  partition (so `coalesced / (coalesced + calls)` means what it says)
+  needed that distinction. `internal/resolver` now uses a small hand-rolled
+  in-flight tracker (`inflightCall`, an `*int64`-keyed map guarded by a
+  mutex plus a `sync.WaitGroup` per key) that exposes exactly that:
+  precisely one caller executes and increments `..._calls_total`, every
+  other caller for the same key waits and increments `..._coalesced_total`.
+  Verified with a real concurrency test: 20 goroutines querying the same
+  name against a slow fake DoH server produce exactly
+  `powerdns_upstream_calls_total{path="doh"} 1` and
+  `powerdns_upstream_coalesced_total{path="doh"} 19` -- an exact partition,
+  not an approximation.
+- **Prefetching got `powerdns_cache_prefetch_total{result="success"|"failure"}`
+  and `powerdns_cache_prefetch_skipped_total{reason="in_flight"|"cooldown"}`.**
+  The skip-reason counter matters as much as the outcome counter here:
+  without it, a prefetch feature that's silently never firing (misconfigured
+  threshold/min_hits) and one that's firing constantly (no cooldown
+  protection working) look identical from the outside -- both just show
+  occasional successes. Now the `cooldown`/`in_flight` skip counts make the
+  "protection against refreshing every low-TTL record continuously"
+  described when prefetching shipped an observable fact, not an assumption.
+
+## Deeper cache observability, per-path latency, prefetching, and request coalescing
+
+The first cut of cache metrics (`powerdns_cache_hits_total` /
+`powerdns_cache_misses_total`) told you *that* something missed, not *why*,
+and the only latency histogram was one aggregate number for "the relay,"
+with no way to tell whether a slow relay meant a slow DoH leg, a slow DoT
+leg, or a slow plain-DNS fallback. Cache misses were also a dead end --
+nothing ever refreshed a popular record before it actually expired, and N
+concurrent identical queries after an expiry meant N simultaneous upstream
+calls. This round of changes addresses all of that:
+
+- **Miss reasons, not just miss counts.** `powerdns_cache_misses_total` is
+  now labeled `reason="not_found"|"expired"|"disabled"` --
+  `internal/cache.Cache.Get` distinguishes a key that was never cached from
+  one that expired in place, and `internal/resolver` records `"disabled"`
+  when caching is off entirely (something no `Cache` object exists to
+  report on its own). `powerdns_cache_evictions_total{reason="lru"}` is new
+  too, separate from ordinary misses, since an entry pushed out to make
+  room under `max_entries` is a capacity signal, not a locality one.
+- **Cache hit rate and occupancy gauges.** `powerdns_cache_hit_rate` is a
+  cumulative `hits / (hits + misses)` convenience gauge (for a
+  time-windowed rate, use Prometheus's own `rate()` over the counters
+  instead). `powerdns_cache_entries` and `powerdns_cache_capacity` report
+  current occupancy against `max_entries` via a callback
+  (`metrics.Registry.SetCacheSizeFunc`) rather than the metrics package
+  importing the cache package, to keep the dependency pointing one way.
+- **Per-path upstream latency.** `powerdns_upstream_latency_ms{path=...}`
+  now breaks latency down by `relay`, `doh`, `dot`, and `plain`, both for
+  the client's own fallback chain (`internal/resolver`) and for the relay's
+  *internal* doh/dot/plain sub-attempts (`internal/upstream.Chain`, which
+  the relay uses to resolve real queries). The relay's own end-to-end
+  resolution time is now a separate metric,
+  `powerdns_relay_server_latency_ms`, so it's never confused with "how long
+  did it take a client to reach the relay" (`path="relay"` under the
+  upstream histogram).
+- **Prefetching** (`[cache.prefetch]`, off by default): `internal/cache`
+  now tracks a hit count and last-hit time per entry. Once an entry's
+  remaining TTL drops below `threshold_seconds` and it's been hit at least
+  `min_hits` times, the next `Get` kicks off a background refresh via a
+  `RefreshFunc` callback (wired to `resolver.ResolveUpstreamOnly`) --
+  guarded by an in-flight map and a cooldown so a persistently-failing
+  upstream isn't hammered once per query during a hot key's last few
+  seconds of TTL. A refreshed entry keeps its accumulated hit count rather
+  than resetting it, so popularity tracking survives the refresh.
+- **Request coalescing.** `internal/resolver.Resolver` now runs every
+  network-bound strategy attempt through a `golang.org/x/sync/singleflight`
+  group keyed by `(qname, qtype, strategy)`. Concurrent callers share the
+  one in-flight upstream round trip, but each still gets back its own
+  independent, correctly-ID-stamped `*dns.Msg` (`restampReply` deep-copies
+  the shared answer and re-stamps `Id`/`Question` per caller) -- sharing
+  the response object itself, Id included, would have broken the DNS
+  protocol for every caller but whichever one happened to trigger the
+  request. The same coalescing key space is used by prefetch refreshes, so
+  a background prefetch and a concurrent real query for the same record
+  share one round trip rather than racing each other.
+- **Cache key hygiene, confirmed.** The cache key was already exactly
+  `FQDN + query type` (see `internal/cache`'s `key` function) and nothing
+  else -- no client identity, transport, or request ID folds into it. This
+  round added an explicit doc comment on `key` recording that invariant
+  deliberately, so it doesn't erode by accident later.
+
 ## The core relay protocol was rebuilt
 
 **v1:** the relay spoke a bespoke protocol: the client did an HTTP `GET
@@ -188,5 +356,7 @@ still run a fully open relay by leaving these blank, but now it's a choice.
   `/healthz`, instead of running the server as root with no health signal.
 - Dependencies dropped: `gin-gonic/gin`, `gin-contrib/cors`. Kept/added:
   `miekg/dns` (DNS message handling and, via its `tcp-tls` transport, DoT
-  client/server support -- no extra dependency needed) and `BurntSushi/toml`
-  (config parsing, zero transitive dependencies).
+  client/server support -- no extra dependency needed), `BurntSushi/toml`
+  (config parsing, zero transitive dependencies), and
+  `golang.org/x/sync/singleflight` (request coalescing -- a single
+  well-audited function from the Go team, not a general-purpose framework).

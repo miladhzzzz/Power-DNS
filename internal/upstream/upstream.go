@@ -21,6 +21,7 @@ import (
 
 	"github.com/miekg/dns"
 
+	"github.com/miladhzzzz/power-dns/internal/metrics"
 	"github.com/miladhzzzz/power-dns/internal/wire"
 )
 
@@ -91,28 +92,43 @@ func (d *DoHClient) query(ctx context.Context, server string, reqBytes []byte) (
 // block different transports, so trying HTTPS (DoH), then TLS-on-853 (DoT),
 // then plain give three independent chances to get through before giving
 // up.
+//
+// If Metrics is set, each sub-attempt (whether it succeeds or fails) is
+// timed under its own path label (metrics.PathDoH/PathDoT/PathPlain), so
+// "the relay is slow" becomes "the relay's DoT leg is slow" rather than one
+// opaque aggregate number.
 type Chain struct {
-	DoH   *DoHClient
-	DoT   *DoTClient
-	Plain *PlainClient
+	DoH     *DoHClient
+	DoT     *DoTClient
+	Plain   *PlainClient
+	Metrics *metrics.Registry // optional
 }
 
 // Resolve implements the relay.Upstream interface.
 func (c *Chain) Resolve(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
 	if c.DoH != nil {
-		if resp, err := c.DoH.Resolve(ctx, req); err == nil {
+		if resp, err := c.timed(metrics.PathDoH, func() (*dns.Msg, error) { return c.DoH.Resolve(ctx, req) }); err == nil {
 			return resp, nil
 		}
 	}
 	if c.DoT != nil {
-		if resp, err := c.DoT.Resolve(ctx, req); err == nil {
+		if resp, err := c.timed(metrics.PathDoT, func() (*dns.Msg, error) { return c.DoT.Resolve(ctx, req) }); err == nil {
 			return resp, nil
 		}
 	}
 	if c.Plain != nil {
-		return c.Plain.Resolve(ctx, req)
+		return c.timed(metrics.PathPlain, func() (*dns.Msg, error) { return c.Plain.Resolve(ctx, req) })
 	}
 	return nil, fmt.Errorf("no upstream available")
+}
+
+func (c *Chain) timed(path string, attempt func() (*dns.Msg, error)) (*dns.Msg, error) {
+	start := time.Now()
+	resp, err := attempt()
+	if c.Metrics != nil {
+		c.Metrics.ObserveUpstreamLatency(path, time.Since(start))
+	}
+	return resp, err
 }
 
 // DoTClient queries a list of RFC 7858 DNS-over-TLS servers (host:port,

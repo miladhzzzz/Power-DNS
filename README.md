@@ -124,10 +124,81 @@ Kubernetes client in Power-DNS itself.
 
 ### Metrics
 
-`GET /metrics` on the API port exposes Prometheus text-format counters
-(`powerdns_queries_total{strategy=...}`, `powerdns_relay_latency_ms`,
-`powerdns_uptime_seconds`). See [CHANGES.md](./CHANGES.md) for why this
-replaces the originally-planned eBPF metrics.
+`GET /metrics` on the API port exposes Prometheus text-format metrics:
+
+- `powerdns_queries_total{strategy=...}` -- resolved (or failed) queries by
+  which strategy answered.
+- `powerdns_cache_hits_total` / `powerdns_cache_hit_rate` -- cumulative
+  cache effectiveness.
+- `powerdns_cache_misses_total{reason="not_found"|"expired"|"disabled"}` --
+  *why* a lookup missed, not just that it did.
+- `powerdns_cache_evictions_total{reason="lru"}` -- entries removed to make
+  room under `max_entries`.
+- `powerdns_cache_entries` / `powerdns_cache_capacity` -- current occupancy
+  against the configured cap.
+- `powerdns_upstream_latency_ms{path="relay"|"doh"|"dot"|"plain"}` -- a
+  latency histogram per upstream path, both for the client's own fallback
+  chain and, in relay/both mode, the relay's internal doh/dot/plain
+  sub-attempts.
+- `powerdns_relay_server_latency_ms` -- how long the relay itself spends
+  resolving a query end-to-end (relay/both mode only).
+- `powerdns_upstream_calls_total{path=...}` / `powerdns_upstream_coalesced_total{path=...}`
+  / `powerdns_upstream_coalesce_rate{path=...}` -- how many queries per path
+  triggered a real network call versus rode along on someone else's
+  in-flight one, and the resulting cumulative coalesce rate. Tracked on the
+  client's own fallback chain.
+- `powerdns_relay_calls_total` / `powerdns_relay_coalesced_total` /
+  `powerdns_relay_coalesce_rate` -- the same idea, but for the relay's own
+  incoming-query coalescing (relay/both mode only): concurrent DoH/DoT
+  requests for the same (qname, qtype) arriving at the relay -- from one
+  client or many -- share a single upstream resolution. This is the more
+  consequential of the two in practice, since a relay is more likely than a
+  lightly-loaded local resolver to see genuinely concurrent identical
+  queries (many clients, or many devices behind one relay, asking for the
+  same freshly-expired popular domain at once).
+- `powerdns_cache_prefetch_total{result="success"|"failure"}` -- background
+  prefetch refresh outcomes.
+- `powerdns_cache_prefetch_skipped_total{reason="in_flight"|"cooldown"}` --
+  prefetch candidates that were eligible but not attempted (already
+  running, or tried too recently) -- this is what makes the "don't hammer a
+  dead upstream" protection observable instead of just assumed.
+- `powerdns_uptime_seconds`.
+
+See [CHANGES.md](./CHANGES.md) for why this replaces the originally-planned
+eBPF metrics.
+
+### Cache prefetching and request coalescing
+
+Two related optimizations, both on by default except prefetching itself:
+
+- **Prefetching** (`[cache.prefetch]`, off by default): once a cached
+  entry's remaining TTL drops below `threshold_seconds`, *and* it's been
+  served from cache at least `min_hits` times, the next hit triggers a
+  background refresh -- the caller still gets the (still-valid) cached
+  answer immediately, and the cache is refreshed before it actually
+  expires. A popular record's TTL never reaches zero from a caller's point
+  of view. `min_hits` keeps a one-off lookup from generating background
+  upstream traffic for a record nobody else wants.
+- **Request coalescing** (always on, no config): concurrent queries for the
+  same (name, type[, strategy]) that all miss the cache at once -- 50
+  clients asking for a record in the same instant right after it expires,
+  say -- share a single in-flight upstream call instead of firing 50. Each
+  caller still gets its own correctly-addressed response; only the actual
+  network round trip is shared. This runs on both sides: the client's
+  fallback chain (relay/doh/dot/plain) and, independently, the relay's own
+  incoming-query handling -- so it protects a relay serving many external
+  clients just as much as it protects a single client's upstream fallback.
+
+### Debug logging
+
+Set `log.level = "debug"` to trace exactly which route (records, cache,
+relay, doh, dot, or plain) answered each query, and for whom -- every debug
+line includes the origin (the querying client's address) and the strategy
+tried. At `info` level and above, only service lifecycle events and genuine
+failures are logged, so normal operation doesn't produce a line per query.
+An unconfigured relay (`relay.url` and `relay.dot_addr` both empty) is a
+valid, deliberately disabled state, not an error -- the client just skips
+straight to its doh/dot/plain fallbacks.
 
 ## Configuration reference
 

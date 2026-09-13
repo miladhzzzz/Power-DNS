@@ -46,18 +46,34 @@ url = "https://relay.example.com/dns-query"
 	}
 }
 
-func TestClientModeRequiresRelayURLOrDoT(t *testing.T) {
+func TestRelayDisabledWhenURLAndDoTAddrEmpty(t *testing.T) {
 	cfg := Default()
 	cfg.Mode = ModeClient
 	cfg.Relay.URL = ""
 	cfg.Relay.DoTAddr = ""
-	if err := cfg.Validate(); err == nil {
-		t.Fatalf("expected validation error when client mode has no relay.url or relay.dot_addr")
+
+	// An unconfigured relay is valid, not an error -- it just means the
+	// "relay" resolution strategy is disabled and the client falls
+	// straight through to its doh/dot/plain fallbacks.
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected an unconfigured relay to validate cleanly, got: %v", err)
+	}
+	if !cfg.RelayDisabled() {
+		t.Fatalf("expected RelayDisabled() to be true when both relay.url and relay.dot_addr are empty")
 	}
 
+	cfg.Relay.URL = "https://relay.example.com/dns-query"
+	if cfg.RelayDisabled() {
+		t.Fatalf("expected RelayDisabled() to be false once relay.url is set")
+	}
+
+	cfg.Relay.URL = ""
 	cfg.Relay.DoTAddr = "relay.example.com:853"
+	if cfg.RelayDisabled() {
+		t.Fatalf("expected RelayDisabled() to be false when only relay.dot_addr is set")
+	}
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("expected dot_addr alone to satisfy validation, got: %v", err)
+		t.Fatalf("expected dot_addr alone to validate, got: %v", err)
 	}
 }
 

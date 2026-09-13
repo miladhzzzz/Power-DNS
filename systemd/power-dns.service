@@ -1,0 +1,70 @@
+# systemd unit for Power-DNS.
+#
+# Works unmodified for any mode ("client", "relay", or "both") -- the
+# binary itself decides what to run based on /etc/power-dns/config.toml.
+#
+# Installed by `make install-systemd` (see the Makefile at the repo root),
+# which also creates the power-dns system user, /etc/power-dns/config.toml
+# (from config.example.toml, if one isn't already there), and the
+# /var/lib/power-dns state directory this unit expects.
+#
+# Manual install, if you'd rather not use the Makefile target:
+#   sudo cp systemd/power-dns.service /etc/systemd/system/power-dns.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now power-dns
+
+[Unit]
+Description=Power-DNS (DoH/DoT relay and client)
+Documentation=https://github.com/miladhzzzz/power-dns
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=power-dns
+Group=power-dns
+
+# Reads /etc/power-dns/config.toml. Change this path (and the matching
+# -config flag) if you keep config.toml somewhere else.
+ExecStart=/usr/local/bin/power-dns -config /etc/power-dns/config.toml
+
+# StateDirectory creates and owns /var/lib/power-dns for us (records.json,
+# cache.gob, or whatever relative paths config.toml's [records].path and
+# [cache].persist_path point at); WorkingDirectory makes relative paths in
+# config.toml resolve there instead of at "/".
+StateDirectory=power-dns
+WorkingDirectory=/var/lib/power-dns
+
+Restart=on-failure
+RestartSec=2s
+LimitNOFILE=65536
+
+# Binding to a privileged port (":53" for dns_server.listen_addr, or ":853"
+# for a dot listener) needs CAP_NET_BIND_SERVICE even for a non-root user.
+# If you only bind to ports >1024 (the config.example.toml defaults do),
+# these two lines are harmless no-ops and can be left as-is or removed.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# Sandboxing. NoNewPrivileges is compatible with the ambient capability
+# above. If you point [api.relay_dot] or [dns_server.dot] at certificate
+# files outside /etc/power-dns (e.g. /etc/letsencrypt), add a
+# ReadOnlyPaths= line for that directory -- ProtectSystem=strict below
+# makes the rest of the filesystem read-only to this service.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+ReadOnlyPaths=/etc/power-dns
+
+[Install]
+WantedBy=multi-user.target

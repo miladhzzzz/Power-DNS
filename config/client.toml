@@ -15,6 +15,14 @@ records_path_prefix = "/api/v1/records"
 enabled = true
 persist_path = "/app/data/cache.gob"
 
+# Uncomment to refresh popular records in the background before they
+# expire, instead of every client eating one cold-cache lookup per TTL
+# cycle:
+# [cache.prefetch]
+# enabled = true
+# threshold_seconds = 30
+# min_hits = 5
+
 [records]
 enabled = true
 path = "/app/data/records.json"

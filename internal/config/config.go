@@ -104,6 +104,27 @@ type CacheConfig struct {
 	// PersistPath, if set, is where the cache is periodically snapshotted
 	// and reloaded from on startup. Empty disables persistence.
 	PersistPath string `toml:"persist_path"`
+
+	Prefetch PrefetchConfig `toml:"prefetch"`
+}
+
+// PrefetchConfig controls background refresh of popular, soon-to-expire
+// cache entries so a hot record's TTL never actually reaches zero from a
+// caller's point of view. Disabled by default -- it trades a little extra
+// upstream load for lower tail latency on hot records, and that's an
+// opt-in trade, not a default.
+type PrefetchConfig struct {
+	Enabled bool `toml:"enabled"`
+	// ThresholdSeconds is how much TTL an entry needs left before it's
+	// considered "soon to expire" and a candidate for prefetching.
+	ThresholdSeconds int `toml:"threshold_seconds"`
+	// MinHits is the minimum number of times an entry must have been
+	// served from cache before it's considered popular enough to bother
+	// prefetching -- this is what keeps a one-off lookup from generating
+	// background upstream traffic for a record nobody else wants.
+	MinHits uint64 `toml:"min_hits"`
+	// TimeoutSeconds bounds each background refresh attempt.
+	TimeoutSeconds int `toml:"timeout_seconds"`
 }
 
 // RecordsConfig controls the local authoritative overrides store (the v1
@@ -113,10 +134,14 @@ type RecordsConfig struct {
 	Path    string `toml:"path"` // JSON file the records store persists to
 }
 
-// RelayConfig controls how the client talks to its relay.
+// RelayConfig controls how the client talks to its relay. Leaving both URL
+// and DoTAddr empty disables the relay entirely (see Config.RelayDisabled)
+// -- the client just skips straight to its doh/dot/plain fallbacks. This is
+// a normal, supported configuration, not an error.
 type RelayConfig struct {
 	// URL is the relay's DoH endpoint, e.g. "https://relay.example.com/dns-query".
-	// Leave empty to only use DoT (DoTAddr) to reach the relay.
+	// Empty disables DoH specifically; if DoTAddr is also empty, the relay
+	// strategy is disabled entirely.
 	URL string `toml:"url"`
 	// DoTAddr is the relay's DoT endpoint (host:port, e.g.
 	// "relay.example.com:853"). If both URL and DoTAddr are set, the
@@ -196,6 +221,12 @@ func Default() Config {
 			MaxTTLSeconds:      3600,
 			NegativeTTLSeconds: 30,
 			PersistPath:        "",
+			Prefetch: PrefetchConfig{
+				Enabled:          false,
+				ThresholdSeconds: 30,
+				MinHits:          5,
+				TimeoutSeconds:   5,
+			},
 		},
 		Records: RecordsConfig{
 			Enabled: true,
@@ -236,17 +267,16 @@ func Load(path string) (Config, error) {
 	return cfg, cfg.Validate()
 }
 
-// Validate sanity-checks a loaded configuration.
+// Validate sanity-checks a loaded configuration. An unconfigured relay
+// (both Relay.URL and Relay.DoTAddr empty) is a valid, normal
+// configuration -- it simply disables the "relay" resolution strategy, and
+// the client falls straight through to doh/dot/plain, so Validate does not
+// treat it as an error.
 func (c Config) Validate() error {
 	switch c.Mode {
 	case ModeClient, ModeRelay, ModeBoth:
 	default:
 		return fmt.Errorf("invalid mode %q (want client, relay, or both)", c.Mode)
-	}
-	if (c.Mode == ModeClient) && c.Relay.URL == "" && c.Relay.DoTAddr == "" {
-		// Not fatal: the client can still work via doh/plain fallback, but
-		// it's almost certainly a misconfiguration worth flagging loudly.
-		return fmt.Errorf("mode is %q but relay.url and relay.dot_addr are both empty; the client will skip the relay entirely and fall back to doh/dot/plain upstreams", c.Mode)
 	}
 	for _, step := range c.Resolution.Order {
 		switch step {
@@ -256,4 +286,13 @@ func (c Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+// RelayDisabled reports whether the client has no way to reach a relay --
+// both Relay.URL and Relay.DoTAddr are empty. Treat this as "the relay
+// resolution strategy is disabled", not an error: callers should skip
+// constructing a relay client entirely and, if useful, log it once at
+// startup.
+func (c Config) RelayDisabled() bool {
+	return c.Relay.URL == "" && c.Relay.DoTAddr == ""
 }

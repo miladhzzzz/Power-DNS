@@ -1,5 +1,3 @@
-version: "3.9"
-
 # Example deployment: a relay (deploy this on a host with unrestricted DNS
 # access) and a client (deploy this wherever DoH is restricted, pointed at
 # the relay). Adjust config/*.toml before using in production, and put a

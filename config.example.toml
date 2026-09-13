@@ -50,7 +50,9 @@ cert_file = ""   # e.g. "/etc/letsencrypt/live/your-domain/fullchain.pem"
 key_file = ""    # e.g. "/etc/letsencrypt/live/your-domain/privkey.pem"
 
 # The answer cache. TTLs are taken from real upstream answers and clamped to
-# [min_ttl_seconds, max_ttl_seconds].
+# [min_ttl_seconds, max_ttl_seconds]. Metrics at /metrics break misses down
+# by reason (not_found / expired / disabled) and report current occupancy
+# (powerdns_cache_entries) against max_entries (powerdns_cache_capacity).
 [cache]
 enabled = true
 max_entries = 10000
@@ -58,6 +60,21 @@ min_ttl_seconds = 30
 max_ttl_seconds = 3600
 negative_ttl_seconds = 30
 persist_path = "" # e.g. "cache.gob" to survive restarts
+
+# Background prefetching: refresh a cache entry before it expires, so a
+# popular record's TTL never actually reaches zero from a caller's point of
+# view. Off by default -- it trades a little extra upstream load for lower
+# tail latency on hot records.
+[cache.prefetch]
+enabled = false
+# An entry becomes a prefetch candidate once less than this much TTL
+# remains.
+threshold_seconds = 30
+# ...but only if it's been served from cache at least this many times --
+# this is what stops a one-off lookup from generating background traffic
+# for a record nobody else cares about.
+min_hits = 5
+timeout_seconds = 5
 
 # Local authoritative overrides -- the "custom DNS record management"
 # feature. Manage records via the [api] records_path_prefix REST API:

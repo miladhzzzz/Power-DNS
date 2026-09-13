@@ -61,6 +61,11 @@ func run(cfg config.Config, logger *slog.Logger) error {
 		}
 	}
 
+	// Created early (mostly empty) so cache prefetching can bind its
+	// RefreshFunc to res.ResolveUpstreamOnly now; res's other fields are
+	// filled in below, well before anything actually calls Refresh.
+	res := &resolver.Resolver{}
+
 	var answerCache *cache.Cache
 	if cfg.Cache.Enabled {
 		answerCache = cache.New(cache.Options{
@@ -69,7 +74,16 @@ func run(cfg config.Config, logger *slog.Logger) error {
 			MaxTTL:      time.Duration(cfg.Cache.MaxTTLSeconds) * time.Second,
 			NegativeTTL: time.Duration(cfg.Cache.NegativeTTLSeconds) * time.Second,
 			PersistPath: cfg.Cache.PersistPath,
+			Metrics:     reg,
+			Prefetch: cache.PrefetchOptions{
+				Enabled:   cfg.Cache.Prefetch.Enabled,
+				Threshold: time.Duration(cfg.Cache.Prefetch.ThresholdSeconds) * time.Second,
+				MinHits:   cfg.Cache.Prefetch.MinHits,
+				Refresh:   res.ResolveUpstreamOnly,
+				Timeout:   time.Duration(cfg.Cache.Prefetch.TimeoutSeconds) * time.Second,
+			},
 		})
+		reg.SetCacheSizeFunc(func() (int, int) { return answerCache.Len(), answerCache.Cap() })
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -90,14 +104,16 @@ func run(cfg config.Config, logger *slog.Logger) error {
 
 	// Relay-side: an RFC 8484 DoH endpoint (and, if configured, an RFC 7858
 	// DoT endpoint) backed by real upstreams. Only started in relay/both
-	// mode.
+	// mode. Chain.Metrics gives per-sub-path (doh/dot/plain) latency for
+	// the relay's own upstream resolution, not just one aggregate number.
 	var relayHandler *relay.Server
 	if cfg.Mode == config.ModeRelay || cfg.Mode == config.ModeBoth {
 		relayHandler = relay.NewServer(
 			&upstream.Chain{
-				DoH:   upstream.NewDoHClient(cfg.Upstream.DoHServers, time.Duration(cfg.Upstream.TimeoutSeconds)*time.Second),
-				DoT:   upstream.NewDoTClient(cfg.Upstream.DoTServers, time.Duration(cfg.Upstream.TimeoutSeconds)*time.Second),
-				Plain: upstream.NewPlainClient(cfg.Upstream.PlainServers, time.Duration(cfg.Upstream.TimeoutSeconds)*time.Second),
+				DoH:     upstream.NewDoHClient(cfg.Upstream.DoHServers, time.Duration(cfg.Upstream.TimeoutSeconds)*time.Second),
+				DoT:     upstream.NewDoTClient(cfg.Upstream.DoTServers, time.Duration(cfg.Upstream.TimeoutSeconds)*time.Second),
+				Plain:   upstream.NewPlainClient(cfg.Upstream.PlainServers, time.Duration(cfg.Upstream.TimeoutSeconds)*time.Second),
+				Metrics: reg,
 			},
 			logger.With("component", "relay"),
 			reg,
@@ -127,22 +143,22 @@ func run(cfg config.Config, logger *slog.Logger) error {
 	// client/both mode.
 	if cfg.Mode == config.ModeClient || cfg.Mode == config.ModeBoth {
 		var relayClient *relay.Client
-		if cfg.Relay.URL != "" || cfg.Relay.DoTAddr != "" {
+		if cfg.RelayDisabled() {
+			logger.Info("relay is disabled (relay.url and relay.dot_addr are both empty); queries will use doh/dot/plain fallback directly")
+		} else {
 			relayClient = relay.NewClient(cfg.Relay.URL, cfg.Relay.DoTAddr, cfg.Relay.AuthToken, time.Duration(cfg.Relay.TimeoutSeconds)*time.Second)
 		}
 
-		res := &resolver.Resolver{
-			Order:       cfg.Resolution.Order,
-			Records:     recStore,
-			Cache:       answerCache,
-			RelayClient: relayClient,
-			DoH:         upstream.NewDoHClient(cfg.Upstream.DoHServers, time.Duration(cfg.Upstream.TimeoutSeconds)*time.Second),
-			DoT:         upstream.NewDoTClient(cfg.Upstream.DoTServers, time.Duration(cfg.Upstream.TimeoutSeconds)*time.Second),
-			Plain:       upstream.NewPlainClient(cfg.Upstream.PlainServers, time.Duration(cfg.Upstream.TimeoutSeconds)*time.Second),
-			Timeout:     time.Duration(cfg.Relay.TimeoutSeconds) * time.Second,
-			Logger:      logger.With("component", "resolver"),
-			Metrics:     reg,
-		}
+		res.Order = cfg.Resolution.Order
+		res.Records = recStore
+		res.Cache = answerCache
+		res.RelayClient = relayClient
+		res.DoH = upstream.NewDoHClient(cfg.Upstream.DoHServers, time.Duration(cfg.Upstream.TimeoutSeconds)*time.Second)
+		res.DoT = upstream.NewDoTClient(cfg.Upstream.DoTServers, time.Duration(cfg.Upstream.TimeoutSeconds)*time.Second)
+		res.Plain = upstream.NewPlainClient(cfg.Upstream.PlainServers, time.Duration(cfg.Upstream.TimeoutSeconds)*time.Second)
+		res.Timeout = time.Duration(cfg.Relay.TimeoutSeconds) * time.Second
+		res.Logger = logger.With("component", "resolver")
+		res.Metrics = reg
 
 		dnsSrv := dnsserver.New(
 			cfg.DNSServer.ListenAddr,

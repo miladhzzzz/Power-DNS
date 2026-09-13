@@ -13,10 +13,15 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/miekg/dns"
+
+	"github.com/miladhzzzz/power-dns/internal/metrics"
 )
 
 // fakeUpstream answers every A query with a fixed IP, so the test doesn't
@@ -31,6 +36,83 @@ func (fakeUpstream) Resolve(ctx context.Context, req *dns.Msg) (*dns.Msg, error)
 		resp.Answer = append(resp.Answer, rr)
 	}
 	return resp, nil
+}
+
+// slowCountingUpstream records how many times it was actually invoked and
+// sleeps before answering, so concurrent callers genuinely overlap in time
+// -- what a real coalescing test needs, versus an instant fake that might
+// finish before a second caller even checks whether a call is in flight.
+type slowCountingUpstream struct {
+	calls *int32
+	delay time.Duration
+}
+
+func (u *slowCountingUpstream) Resolve(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
+	atomic.AddInt32(u.calls, 1)
+	time.Sleep(u.delay)
+	resp := new(dns.Msg)
+	resp.SetReply(req)
+	rr, _ := dns.NewRR(req.Question[0].Name + " 60 IN A 198.51.100.42")
+	resp.Answer = append(resp.Answer, rr)
+	return resp, nil
+}
+
+func TestRelayCoalescesConcurrentIdenticalQueries(t *testing.T) {
+	var calls int32
+	up := &slowCountingUpstream{calls: &calls, delay: 50 * time.Millisecond}
+	reg := metrics.New()
+
+	srv := NewServer(up, nil, reg, "", nil, 0)
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	const n = 20
+	var wg sync.WaitGroup
+	results := make([]*dns.Msg, n)
+	reqs := make([]*dns.Msg, n)
+	for i := 0; i < n; i++ {
+		reqs[i] = new(dns.Msg)
+		reqs[i].SetQuestion("coalesce.example.com.", dns.TypeA)
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			client := NewClient(ts.URL, "", "", 2*time.Second)
+			resp, err := client.Resolve(context.Background(), reqs[i])
+			if err != nil {
+				t.Errorf("caller %d: Resolve: %v", i, err)
+				return
+			}
+			results[i] = resp
+		}(i)
+	}
+	wg.Wait()
+
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected exactly 1 real upstream call for %d concurrent identical queries, got %d", n, got)
+	}
+	for i, resp := range results {
+		if resp == nil {
+			continue // already reported via t.Errorf above
+		}
+		if len(resp.Answer) != 1 {
+			t.Fatalf("caller %d: expected 1 answer, got %d", i, len(resp.Answer))
+		}
+		if resp.Id != reqs[i].Id {
+			t.Fatalf("caller %d: expected response Id %d to match its own request Id %d (coalescing must not leak another caller's Id)", i, resp.Id, reqs[i].Id)
+		}
+	}
+
+	var b strings.Builder
+	reg.WriteProm(&b)
+	out := b.String()
+	// A clean partition of all 20 callers: exactly 1 triggered the real
+	// call, the other 19 rode along on it.
+	if !strings.Contains(out, "powerdns_relay_calls_total 1") {
+		t.Fatalf("expected exactly 1 relay call recorded, got:\n%s", out)
+	}
+	if !strings.Contains(out, "powerdns_relay_coalesced_total 19") {
+		t.Fatalf("expected exactly 19 coalesced relay queries recorded, got:\n%s", out)
+	}
 }
 
 func TestRelayClientServerRoundTripDoH(t *testing.T) {

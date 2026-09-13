@@ -1,10 +1,16 @@
 package cache
 
 import (
+	"context"
+	"fmt"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/miekg/dns"
+
+	"github.com/miladhzzzz/power-dns/internal/metrics"
 )
 
 func makeAnswer(name string, ttl uint32) *dns.Msg {
@@ -103,5 +109,284 @@ func TestDelete(t *testing.T) {
 	req.SetQuestion("del.com.", dns.TypeA)
 	if _, ok := c.Get(req, "del.com.", dns.TypeA); ok {
 		t.Fatalf("expected entry to be deleted")
+	}
+}
+
+func metricsSnapshot(reg *metrics.Registry) string {
+	var b strings.Builder
+	reg.WriteProm(&b)
+	return b.String()
+}
+
+func TestMissReasonNotFound(t *testing.T) {
+	reg := metrics.New()
+	c := New(Options{MaxEntries: 10, MinTTL: time.Second, MaxTTL: time.Hour, NegativeTTL: time.Second, Metrics: reg})
+
+	req := new(dns.Msg)
+	req.SetQuestion("neverseen.com.", dns.TypeA)
+	if _, ok := c.Get(req, "neverseen.com.", dns.TypeA); ok {
+		t.Fatalf("expected a miss for a key that was never set")
+	}
+
+	out := metricsSnapshot(reg)
+	if !strings.Contains(out, `powerdns_cache_misses_total{reason="not_found"} 1`) {
+		t.Fatalf("expected a not_found miss, got:\n%s", out)
+	}
+}
+
+func TestMissReasonExpired(t *testing.T) {
+	reg := metrics.New()
+	c := New(Options{MaxEntries: 10, MinTTL: 10 * time.Millisecond, MaxTTL: time.Hour, NegativeTTL: time.Second, Metrics: reg})
+	c.Set("expiring2.com.", dns.TypeA, makeAnswer("expiring2.com", 0))
+
+	time.Sleep(30 * time.Millisecond)
+
+	req := new(dns.Msg)
+	req.SetQuestion("expiring2.com.", dns.TypeA)
+	if _, ok := c.Get(req, "expiring2.com.", dns.TypeA); ok {
+		t.Fatalf("expected the entry to have expired")
+	}
+
+	out := metricsSnapshot(reg)
+	if !strings.Contains(out, `powerdns_cache_misses_total{reason="expired"} 1`) {
+		t.Fatalf("expected an expired miss, got:\n%s", out)
+	}
+}
+
+func TestHitIncrementsMetric(t *testing.T) {
+	reg := metrics.New()
+	c := New(Options{MaxEntries: 10, MinTTL: time.Second, MaxTTL: time.Hour, NegativeTTL: time.Second, Metrics: reg})
+	c.Set("hitme.com.", dns.TypeA, makeAnswer("hitme.com", 300))
+
+	req := new(dns.Msg)
+	req.SetQuestion("hitme.com.", dns.TypeA)
+	if _, ok := c.Get(req, "hitme.com.", dns.TypeA); !ok {
+		t.Fatalf("expected a hit")
+	}
+
+	out := metricsSnapshot(reg)
+	if !strings.Contains(out, "powerdns_cache_hits_total 1") {
+		t.Fatalf("expected 1 cache hit, got:\n%s", out)
+	}
+}
+
+func TestLRUEvictionIncrementsMetric(t *testing.T) {
+	reg := metrics.New()
+	c := New(Options{MaxEntries: 1, MinTTL: time.Second, MaxTTL: time.Hour, NegativeTTL: time.Second, Metrics: reg})
+	c.Set("first.com.", dns.TypeA, makeAnswer("first.com", 300))
+	c.Set("second.com.", dns.TypeA, makeAnswer("second.com", 300)) // evicts first.com
+
+	out := metricsSnapshot(reg)
+	if !strings.Contains(out, `powerdns_cache_evictions_total{reason="lru"} 1`) {
+		t.Fatalf("expected 1 lru eviction, got:\n%s", out)
+	}
+}
+
+func TestCapReportsMaxEntries(t *testing.T) {
+	c := New(Options{MaxEntries: 42, MinTTL: time.Second, MaxTTL: time.Hour, NegativeTTL: time.Second})
+	if c.Cap() != 42 {
+		t.Fatalf("expected Cap() to report 42, got %d", c.Cap())
+	}
+}
+
+func TestPrefetchRefreshesPopularSoonToExpireEntry(t *testing.T) {
+	reg := metrics.New()
+
+	var refreshCalls int32
+	refresh := func(ctx context.Context, name string, qtype uint16) (*dns.Msg, error) {
+		atomic.AddInt32(&refreshCalls, 1)
+		return makeAnswer(name, 300), nil // a fresh, long-TTL answer
+	}
+
+	c := New(Options{
+		MaxEntries:  10,
+		MinTTL:      10 * time.Millisecond,
+		MaxTTL:      time.Hour,
+		NegativeTTL: time.Second,
+		Metrics:     reg,
+		Prefetch: PrefetchOptions{
+			Enabled:   true,
+			Threshold: 50 * time.Millisecond, // "soon to expire" = less than this remaining
+			MinHits:   2,                     // needs at least 2 hits to count as popular
+			Refresh:   refresh,
+			Timeout:   time.Second,
+		},
+	})
+
+	// Store with a TTL already inside the prefetch threshold, so the very
+	// next hit is eligible once it's also popular enough.
+	c.Set("popular.com.", dns.TypeA, makeAnswer("popular.com", 0))
+	c.opts.MinTTL = 30 * time.Millisecond // keep the short TTL from being clamped up further
+
+	req := new(dns.Msg)
+	req.SetQuestion("popular.com.", dns.TypeA)
+
+	c.Get(req, "popular.com.", dns.TypeA) // hit 1: not popular enough yet
+	if atomic.LoadInt32(&refreshCalls) != 0 {
+		t.Fatalf("expected no prefetch after only 1 hit, got %d calls", refreshCalls)
+	}
+
+	c.Get(req, "popular.com.", dns.TypeA) // hit 2: now popular enough, and TTL is low -> should prefetch
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if atomic.LoadInt32(&refreshCalls) >= 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if atomic.LoadInt32(&refreshCalls) < 1 {
+		t.Fatalf("expected at least 1 prefetch refresh call, got %d", refreshCalls)
+	}
+
+	// Metrics recording happens just after c.Set() inside the same
+	// goroutine as the refresh call, so give it a moment to land.
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(metricsSnapshot(reg), `powerdns_cache_prefetch_total{result="success"} 1`) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("expected 1 successful prefetch in metrics output, got:\n%s", metricsSnapshot(reg))
+}
+
+func TestPrefetchFailureIsRecorded(t *testing.T) {
+	reg := metrics.New()
+	refresh := func(ctx context.Context, name string, qtype uint16) (*dns.Msg, error) {
+		return nil, fmt.Errorf("upstream is down")
+	}
+
+	c := New(Options{
+		MaxEntries:  10,
+		MinTTL:      10 * time.Millisecond,
+		MaxTTL:      time.Hour,
+		NegativeTTL: time.Second,
+		Metrics:     reg,
+		Prefetch: PrefetchOptions{
+			Enabled:   true,
+			Threshold: 50 * time.Millisecond,
+			MinHits:   1,
+			Refresh:   refresh,
+			Timeout:   time.Second,
+		},
+	})
+	c.Set("flaky.com.", dns.TypeA, makeAnswer("flaky.com", 0))
+	c.opts.MinTTL = 30 * time.Millisecond
+
+	req := new(dns.Msg)
+	req.SetQuestion("flaky.com.", dns.TypeA)
+	c.Get(req, "flaky.com.", dns.TypeA)
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(metricsSnapshot(reg), `powerdns_cache_prefetch_total{result="failure"} 1`) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("expected 1 failed prefetch in metrics output, got:\n%s", metricsSnapshot(reg))
+}
+
+func TestPrefetchSkippedWhileInFlight(t *testing.T) {
+	reg := metrics.New()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	refresh := func(ctx context.Context, name string, qtype uint16) (*dns.Msg, error) {
+		close(started)
+		<-release // hold the first refresh open so a second Get() finds it still in flight
+		return makeAnswer(name, 300), nil
+	}
+
+	c := New(Options{
+		MaxEntries:  10,
+		MinTTL:      10 * time.Millisecond,
+		MaxTTL:      time.Hour,
+		NegativeTTL: time.Second,
+		Metrics:     reg,
+		Prefetch: PrefetchOptions{
+			Enabled:   true,
+			Threshold: 50 * time.Millisecond,
+			MinHits:   1,
+			Refresh:   refresh,
+			Timeout:   5 * time.Second,
+		},
+	})
+	c.Set("slow.com.", dns.TypeA, makeAnswer("slow.com", 0))
+	c.opts.MinTTL = 30 * time.Millisecond
+
+	req := new(dns.Msg)
+	req.SetQuestion("slow.com.", dns.TypeA)
+
+	c.Get(req, "slow.com.", dns.TypeA) // triggers the (now-blocked) refresh goroutine
+	<-started                          // make sure it's actually in flight before checking again
+
+	c.Get(req, "slow.com.", dns.TypeA) // should see the in-flight refresh and skip
+
+	close(release)
+
+	out := metricsSnapshot(reg)
+	if !strings.Contains(out, `powerdns_cache_prefetch_skipped_total{reason="in_flight"} 1`) {
+		t.Fatalf("expected 1 in_flight prefetch skip, got:\n%s", out)
+	}
+}
+
+func TestPrefetchDisabledByDefault(t *testing.T) {
+	var refreshCalls int32
+	refresh := func(ctx context.Context, name string, qtype uint16) (*dns.Msg, error) {
+		atomic.AddInt32(&refreshCalls, 1)
+		return makeAnswer(name, 300), nil
+	}
+
+	// Prefetch.Enabled left false (the zero value) even though a Refresh
+	// func is provided -- prefetching must stay off until explicitly
+	// turned on.
+	c := New(Options{
+		MaxEntries:  10,
+		MinTTL:      time.Millisecond,
+		MaxTTL:      time.Hour,
+		NegativeTTL: time.Second,
+		Prefetch:    PrefetchOptions{Refresh: refresh, Threshold: time.Hour, MinHits: 1},
+	})
+	c.Set("quiet.com.", dns.TypeA, makeAnswer("quiet.com", 1))
+
+	req := new(dns.Msg)
+	req.SetQuestion("quiet.com.", dns.TypeA)
+	c.Get(req, "quiet.com.", dns.TypeA)
+
+	time.Sleep(50 * time.Millisecond)
+	if atomic.LoadInt32(&refreshCalls) != 0 {
+		t.Fatalf("expected no prefetch calls while Prefetch.Enabled is false, got %d", refreshCalls)
+	}
+}
+
+func TestPrefetchDoesNotFireForUnpopularEntry(t *testing.T) {
+	var refreshCalls int32
+	refresh := func(ctx context.Context, name string, qtype uint16) (*dns.Msg, error) {
+		atomic.AddInt32(&refreshCalls, 1)
+		return makeAnswer(name, 300), nil
+	}
+
+	c := New(Options{
+		MaxEntries:  10,
+		MinTTL:      time.Millisecond,
+		MaxTTL:      time.Hour,
+		NegativeTTL: time.Second,
+		Prefetch: PrefetchOptions{
+			Enabled:   true,
+			Threshold: time.Hour, // always "soon to expire" for this test
+			MinHits:   1000,      // effectively unreachable
+			Refresh:   refresh,
+		},
+	})
+	c.Set("unpopular.com.", dns.TypeA, makeAnswer("unpopular.com", 1))
+
+	req := new(dns.Msg)
+	req.SetQuestion("unpopular.com.", dns.TypeA)
+	c.Get(req, "unpopular.com.", dns.TypeA)
+
+	time.Sleep(50 * time.Millisecond)
+	if atomic.LoadInt32(&refreshCalls) != 0 {
+		t.Fatalf("expected no prefetch calls for an entry below MinHits, got %d", refreshCalls)
 	}
 }

@@ -38,7 +38,11 @@ type Upstream interface {
 
 // Server is an RFC 8484 DoH endpoint. It resolves queries against Upstream
 // and optionally enforces an auth token, an allow-list of domains, and a
-// per-source rate limit -- none of which v1's open relay had.
+// per-source rate limit -- none of which v1's open relay had. Concurrent
+// queries for the same (qname, qtype) -- whether they arrive over DoH, DoT,
+// or a mix of both -- are coalesced into a single upstream resolution: this
+// is exactly the "50 clients ask for the same freshly-expired domain at
+// once" scenario a public relay is most likely to actually see.
 type Server struct {
 	Upstream        Upstream
 	Logger          *slog.Logger
@@ -47,6 +51,22 @@ type Server struct {
 	AllowedSuffixes []string // if non-empty, only resolve names under these suffixes
 
 	limiter *rateLimiter
+
+	inflightMu sync.Mutex
+	inflight   map[string]*inflightCall
+}
+
+// inflightCall represents one real, currently-running (or just-finished)
+// upstream resolution that other concurrent queries for the same key are
+// waiting on. Deliberately not golang.org/x/sync/singleflight -- see the
+// identical note on internal/resolver.Resolver.inflight, which applies here
+// for the same reason: telling "I executed" from "I piggybacked" apart is
+// what makes powerdns_relay_calls_total and powerdns_relay_coalesced_total
+// a clean, non-overlapping partition instead of an approximation.
+type inflightCall struct {
+	wg   sync.WaitGroup
+	resp *dns.Msg
+	err  error
 }
 
 // NewServer builds a relay Server. ratePerMinute of 0 disables rate limiting.
@@ -85,7 +105,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respMsg, err := s.resolve(r.Context(), reqMsg, "doh")
+	respMsg, err := s.resolve(r.Context(), reqMsg, "doh", clientIP(r))
 	if err != nil {
 		if err == errDomainNotAllowed {
 			http.Error(w, err.Error(), http.StatusForbidden)
@@ -116,15 +136,26 @@ var (
 )
 
 // resolve is the transport-agnostic core shared by the DoH (ServeHTTP) and
-// DoT (DoTServer) endpoints: check the allow-list, resolve via Upstream,
-// record metrics and logs, and stamp the reply's ID to match the request.
-// transport is just a log label ("doh" or "dot").
-func (s *Server) resolve(ctx context.Context, reqMsg *dns.Msg, transport string) (*dns.Msg, error) {
+// DoT (DoTServer) endpoints: check the allow-list, resolve via Upstream
+// (coalescing concurrent identical queries -- see inflightCall), record
+// metrics and logs, and stamp the reply's ID to match the request. transport
+// is just a log label ("doh" or "dot"); origin is the connecting client's
+// address, used only for debug-level logging (see the package-level note on
+// log levels below).
+//
+// With log.level = "debug", every query logs its origin, transport, and
+// (via Upstream, if it's an *upstream.Chain with a Logger set) which
+// upstream protocol actually answered -- so you can trace the full path a
+// query took through the relay. At info level and above, only genuine
+// failures are logged, so normal operation stays quiet.
+func (s *Server) resolve(ctx context.Context, reqMsg *dns.Msg, transport, origin string) (*dns.Msg, error) {
 	if len(reqMsg.Question) == 0 {
 		return nil, errNoQuestion
 	}
-	qname := reqMsg.Question[0].Name
+	q := reqMsg.Question[0]
+	qname := q.Name
 	if !s.allowed(qname) {
+		s.log().Debug("relay query rejected", "reason", "domain not allowed", "origin", origin, "transport", transport, "qname", qname)
 		return nil, errDomainNotAllowed
 	}
 
@@ -132,18 +163,87 @@ func (s *Server) resolve(ctx context.Context, reqMsg *dns.Msg, transport string)
 	defer cancel()
 
 	start := time.Now()
-	respMsg, err := s.Upstream.Resolve(ctx, reqMsg)
-	if s.Metrics != nil {
-		s.Metrics.ObserveRelayLatency(time.Since(start))
-	}
+	respMsg, shared, err := s.resolveCoalesced(ctx, reqMsg, q)
 	if err != nil {
-		s.log().Warn("relay resolution failed", "transport", transport, "qname", qname, "error", err)
+		s.log().Warn("relay resolution failed", "origin", origin, "transport", transport, "qname", qname, "error", err)
 		return nil, err
 	}
-	respMsg.Id = reqMsg.Id
 
-	s.log().Info("relay query", "transport", transport, "qname", qname, "qtype", dns.TypeToString[reqMsg.Question[0].Qtype], "duration_ms", time.Since(start).Milliseconds())
+	s.log().Debug("resolved query",
+		"origin", origin,
+		"transport", transport,
+		"qname", qname,
+		"qtype", dns.TypeToString[q.Qtype],
+		"coalesced", shared,
+		"duration_ms", time.Since(start).Milliseconds(),
+	)
 	return respMsg, nil
+}
+
+// resolveCoalesced runs s.Upstream.Resolve for (qname, qtype), coalescing
+// concurrent callers into a single in-flight attempt. Every caller gets
+// back its own independent, correctly-ID-stamped *dns.Msg regardless of
+// whether it triggered the call or piggybacked on someone else's -- sharing
+// the response object itself, Id included, would break the DNS protocol for
+// every caller but the one that actually issued the request.
+func (s *Server) resolveCoalesced(ctx context.Context, reqMsg *dns.Msg, q dns.Question) (resp *dns.Msg, shared bool, err error) {
+	key := dns.Fqdn(q.Name) + "|" + dns.TypeToString[q.Qtype]
+
+	s.inflightMu.Lock()
+	if s.inflight == nil {
+		s.inflight = make(map[string]*inflightCall)
+	}
+	if call, ok := s.inflight[key]; ok {
+		s.inflightMu.Unlock()
+		call.wg.Wait()
+		if s.Metrics != nil {
+			s.Metrics.IncRelayCoalesced()
+		}
+		if call.err != nil {
+			return nil, true, call.err
+		}
+		return restampReply(call.resp, reqMsg), true, nil
+	}
+
+	call := &inflightCall{}
+	call.wg.Add(1)
+	s.inflight[key] = call
+	s.inflightMu.Unlock()
+
+	func() {
+		defer func() {
+			s.inflightMu.Lock()
+			delete(s.inflight, key)
+			s.inflightMu.Unlock()
+			call.wg.Done()
+		}()
+
+		start := time.Now()
+		call.resp, call.err = s.Upstream.Resolve(ctx, reqMsg)
+		if s.Metrics != nil {
+			s.Metrics.ObserveRelayServerLatency(time.Since(start))
+			s.Metrics.IncRelayCall()
+		}
+	}()
+
+	if call.err != nil {
+		return nil, false, call.err
+	}
+	return restampReply(call.resp, reqMsg), false, nil
+}
+
+// restampReply deep-copies shared (the response the coalescer handed back,
+// possibly to several concurrent callers) and re-stamps it as a reply to
+// req, so each caller's Id and Question match what it actually asked, while
+// the underlying Answer/Ns/Extra content -- the expensive part to obtain --
+// stays shared.
+func restampReply(shared *dns.Msg, req *dns.Msg) *dns.Msg {
+	resp := shared.Copy()
+	answer, ns, extra := resp.Answer, resp.Ns, resp.Extra
+	resp.SetReply(req)
+	resp.Answer, resp.Ns, resp.Extra = answer, ns, extra
+	resp.Id = req.Id
+	return resp
 }
 
 func (s *Server) allowed(qname string) bool {

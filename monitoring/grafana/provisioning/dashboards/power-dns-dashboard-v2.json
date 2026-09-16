@@ -18,7 +18,7 @@
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
-  "id": null,
+  "id": 3,
   "links": [],
   "panels": [
     {
@@ -37,7 +37,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Rate of past-expiry cache lookups (the population this histogram samples).",
       "fieldConfig": {
@@ -90,8 +90,7 @@
                 "value": 80
               }
             ]
-          },
-          "unit": "ops"
+          }
         },
         "overrides": []
       },
@@ -120,11 +119,11 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
-          "expr": "sum(rate(powerdns_cache_expired_entry_age_seconds_count[10m]))",
-          "legendFormat": "expired lookups/s",
+          "expr": "100 * sum(rate(powerdns_cache_expired_entry_age_seconds_count[10m]))",
+          "legendFormat": "__auto",
           "range": true,
           "refId": "A"
         }
@@ -135,7 +134,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "fieldConfig": {
         "defaults": {
@@ -187,8 +186,7 @@
                 "value": 80
               }
             ]
-          },
-          "unit": "ops"
+          }
         },
         "overrides": []
       },
@@ -215,47 +213,46 @@
       "pluginVersion": "12.0.1",
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "editorMode": "code",
-          "expr": "sum(rate(powerdns_queries_total[5m]))",
-          "legendFormat": "query rate",
+          "expr": "sum(powerdns_queries_total{strategy=~\"doh|dot|plain|failed\"})",
+          "legendFormat": "__auto",
           "range": true,
           "refId": "A"
         },
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
-          "expr": "sum(rate(powerdns_queries_total{strategy=~\"doh|dot|plain|failed\"}[5m]))",
-          "legendFormat": "client upstream rate",
+          "expr": "sum(powerdns_queries_total)",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
           "range": true,
           "refId": "B"
         },
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
-          "expr": "sum(rate(powerdns_upstream_calls_total[5m]))",
-          "legendFormat": "upstream calls rate",
+          "expr": "sum(powerdns_upstream_calls_total)",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "__auto",
           "range": true,
           "refId": "C"
         }
       ],
-      "title": "Queries vs Upstream Calls",
-      "type": "timeseries",
-      "description": "Total queries, client-facing upstream strategies (doh|dot|plain|failed), and real upstream_calls (includes prefetch/SWR background). Prefer rates in mind: raw counters only trend up."
+      "title": "New panel",
+      "type": "timeseries"
     },
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "",
       "fieldConfig": {
@@ -340,7 +337,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "powerdns_cache_effective_hit_rate * 100",
@@ -351,7 +348,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "100 * (1 - \n  sum(powerdns_upstream_calls_total) \n  / \n  clamp_min(sum(powerdns_queries_total), 1)\n)",
@@ -381,7 +378,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "(fresh hits + stale hits) / total lookups. Fraction of queries the caller experienced as instant.",
       "fieldConfig": {
@@ -442,7 +439,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "powerdns_cache_effective_hit_rate * 100",
@@ -457,7 +454,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Cumulative fresh-only cache hit rate (hits / (hits + misses)). Excludes stale hits.",
       "fieldConfig": {
@@ -515,7 +512,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "expr": "powerdns_cache_hit_rate * 100",
           "refId": "A"
@@ -527,7 +524,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Percentage of total queries that did NOT require a real upstream network call.",
       "fieldConfig": {
@@ -588,7 +585,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "100 * (1 - \n  sum(powerdns_upstream_calls_total) \n  / \n  clamp_min(sum(powerdns_queries_total), 1)\n)",
@@ -603,7 +600,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Current cache usage versus configured capacity.",
       "fieldConfig": {
@@ -659,7 +656,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "expr": "100 * powerdns_cache_entries / powerdns_cache_capacity",
           "refId": "A"
@@ -671,7 +668,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Current number of cached DNS answers.",
       "fieldConfig": {
@@ -719,7 +716,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "powerdns_cache_entries",
@@ -733,7 +730,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Power-DNS process uptime.",
       "fieldConfig": {
@@ -785,7 +782,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "expr": "powerdns_uptime_seconds",
           "refId": "A"
@@ -797,7 +794,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Total DNS queries resolved (all strategies) since process start.",
       "fieldConfig": {
@@ -850,7 +847,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "disableTextWrap": false,
           "editorMode": "code",
@@ -869,7 +866,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Real network attempts made to upstreams (after coalescing).",
       "fieldConfig": {
@@ -921,7 +918,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum(powerdns_upstream_calls_total)",
@@ -934,7 +931,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Total fresh (non-expired) cache hits since process start.",
       "fieldConfig": {
@@ -987,7 +984,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "disableTextWrap": false,
           "editorMode": "code",
@@ -1006,7 +1003,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Queries served from expired-but-still-usable cache entries (SWR).",
       "fieldConfig": {
@@ -1061,7 +1058,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "powerdns_cache_stale_hits_total",
@@ -1076,7 +1073,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Background refreshes of popular entries that completed successfully.",
       "fieldConfig": {
@@ -1127,7 +1124,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum(powerdns_cache_prefetch_total{result=\"success\"})",
@@ -1142,7 +1139,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Queries served by another caller's in-flight upstream request.",
       "fieldConfig": {
@@ -1193,7 +1190,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum(powerdns_upstream_coalesced_total)",
@@ -1208,7 +1205,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Of all locally-served answers (fresh + stale), what fraction came from SWR.",
       "fieldConfig": {
@@ -1267,7 +1264,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "100 * \n  powerdns_cache_stale_hits_total \n  / \n  clamp_min(powerdns_cache_hits_total + powerdns_cache_stale_hits_total, 1)",
@@ -1282,7 +1279,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "fieldConfig": {
         "defaults": {
@@ -1337,11 +1334,7 @@
           "expr": "100 *\n  powerdns_cache_prefetch_protected_hits_total\n  /\n  clamp_min(powerdns_cache_hits_total, 1)",
           "legendFormat": "__auto",
           "range": true,
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          }
+          "refId": "A"
         }
       ],
       "title": "Share of fresh hits protected by prefetch %",
@@ -1350,7 +1343,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Success rate of background revalidations triggered by stale hits.",
       "fieldConfig": {
@@ -1409,7 +1402,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "100 * \n  (powerdns_cache_stale_revalidations_total) \n  / \n  clamp_min(powerdns_cache_stale_revalidations_total + powerdns_cache_stale_revalidation_failures_total, 1)",
@@ -1424,7 +1417,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Success rate of background Prefetch triggered by popular domains who are 30s away from expiring.",
       "fieldConfig": {
@@ -1483,7 +1476,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "100 *\n  sum(powerdns_cache_prefetch_total{result=\"success\"})\n  /\n  clamp_min(sum(powerdns_cache_prefetch_total), 1)",
@@ -1498,7 +1491,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Ratio of never-seen names to previously-seen-but-expired names. >1 = still discovering; <1 = mostly recycling known names.",
       "fieldConfig": {
@@ -1551,7 +1544,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "# cumulative\nsum(powerdns_cache_misses_total{reason=\"not_found\"})\n/\nclamp_min(sum(powerdns_cache_misses_total{reason=\"expired\"}), 1)",
@@ -1566,9 +1559,9 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
-      "description": "Warmup score (combined effective hit rate \u00d7 miss composition)",
+      "description": "Warmup score (combined effective hit rate × miss composition)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1617,7 +1610,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "100 *\n  (\n    (sum(rate(powerdns_cache_hits_total[10m])) + sum(rate(powerdns_cache_stale_hits_total[10m])))\n    /\n    clamp_min(\n      sum(rate(powerdns_cache_hits_total[10m]))\n      + sum(rate(powerdns_cache_stale_hits_total[10m]))\n      + sum(rate(powerdns_cache_misses_total[10m])),\n      1e-9\n    )\n  )\n  *\n  (\n    1\n    -\n    (\n      sum(rate(powerdns_cache_misses_total{reason=\"not_found\"}[10m]))\n      /\n      clamp_min(sum(rate(powerdns_cache_misses_total[10m])), 1e-9)\n    )\n  )",
@@ -1626,7 +1619,7 @@
           "refId": "A"
         }
       ],
-      "title": "Warmup score (10 min) (combined effective hit rate \u00d7 miss composition)",
+      "title": "Warmup score (10 min) (combined effective hit rate × miss composition)",
       "type": "gauge"
     },
     {
@@ -1645,7 +1638,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Fresh hits + SWR hits are queries that never waited on upstream. Prefetch successes are background work that prevents future misses. Upstream calls are the expensive path.",
       "fieldConfig": {
@@ -1733,7 +1726,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "rate(powerdns_cache_hits_total[5m])",
@@ -1743,7 +1736,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "rate(powerdns_cache_stale_hits_total[5m])",
@@ -1753,7 +1746,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum(rate(powerdns_cache_prefetch_total{result=\"success\"}[5m]))",
@@ -1763,7 +1756,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum(rate(powerdns_upstream_calls_total[5m]))",
@@ -1777,7 +1770,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Fresh vs effective hit rate (gap = SWR contribution). Upstream avoidance = % of queries that did not trigger a real network call.",
       "fieldConfig": {
@@ -1865,7 +1858,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "100 * \n  sum(rate(powerdns_cache_hits_total[10m]))\n  /\n  clamp_min(\n    sum(rate(powerdns_cache_hits_total[10m])) + sum(rate(powerdns_cache_misses_total[10m])),\n    1e-9\n  )",
@@ -1875,7 +1868,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "100 * \n  (sum(rate(powerdns_cache_hits_total[10m])) + sum(rate(powerdns_cache_stale_hits_total[10m])))\n  /\n  clamp_min(\n    sum(rate(powerdns_cache_hits_total[10m]))\n    + sum(rate(powerdns_cache_stale_hits_total[10m]))\n    + sum(rate(powerdns_cache_misses_total[10m])),\n    1e-9\n  )",
@@ -1885,7 +1878,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "100 * (1 - \n  sum(rate(powerdns_upstream_calls_total[10m])) \n  / \n  clamp_min(sum(rate(powerdns_queries_total[10m])), 1e-9)\n)",
@@ -1899,7 +1892,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Prefetch successes vs failures vs skips (in_flight / cooldown). High skip rates with low failures is healthy protection; high failures mean upstream is struggling.",
       "fieldConfig": {
@@ -1987,7 +1980,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum(rate(powerdns_cache_prefetch_total{result=\"success\"}[5m]))",
@@ -1997,7 +1990,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum(rate(powerdns_cache_prefetch_total{result=\"failure\"}[5m]))",
@@ -2007,7 +2000,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum by (reason) (rate(powerdns_cache_prefetch_skipped_total[5m]))",
@@ -2021,7 +2014,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Every stale hit is an instant answer for the client. Revalidations update the cache in the background. Failures mean the stale answer may linger longer than ideal.",
       "fieldConfig": {
@@ -2109,7 +2102,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "rate(powerdns_cache_stale_hits_total[5m])",
@@ -2119,7 +2112,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "rate(powerdns_cache_stale_revalidations_total[5m])",
@@ -2129,7 +2122,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "rate(powerdns_cache_stale_revalidation_failures_total[5m])",
@@ -2156,7 +2149,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Queries per second by resolution strategy (cache / doh / dot).",
       "fieldConfig": {
@@ -2257,7 +2250,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "expr": "sum by (strategy) (rate(powerdns_queries_total[5m]))",
           "legendFormat": "{{strategy}}",
@@ -2270,7 +2263,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Cumulative distribution of resolution strategies since process start.",
       "fieldConfig": {
@@ -2331,7 +2324,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum by (strategy) (powerdns_queries_total)",
@@ -2359,7 +2352,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Cache lookup rate: fresh hits, stale hits, and misses by reason.",
       "fieldConfig": {
@@ -2446,7 +2439,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "expr": "rate(powerdns_cache_hits_total[5m])",
           "legendFormat": "hit",
@@ -2455,7 +2448,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "expr": "sum by (reason) (rate(powerdns_cache_misses_total[5m]))",
           "legendFormat": "miss: {{reason}}",
@@ -2464,7 +2457,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "rate(powerdns_cache_stale_hits_total[5m])",
@@ -2478,7 +2471,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Rolling 10m fresh hit rate + effective hit rate (fresh + stale). Cumulative effective gauge also shown.",
       "fieldConfig": {
@@ -2572,7 +2565,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "100 * \n  sum(rate(powerdns_cache_hits_total[10m]))\n  /\n  clamp_min(\n    sum(rate(powerdns_cache_hits_total[10m])) + sum(rate(powerdns_cache_misses_total[10m])),\n    1e-9\n  )",
@@ -2583,7 +2576,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "powerdns_cache_effective_hit_rate * 100",
@@ -2593,7 +2586,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "100 *\n  (sum(rate(powerdns_cache_hits_total[10m])) + sum(rate(powerdns_cache_stale_hits_total[10m])))\n  /\n  clamp_min(\n    sum(rate(powerdns_cache_hits_total[10m]))\n    + sum(rate(powerdns_cache_stale_hits_total[10m]))\n    + sum(rate(powerdns_cache_misses_total[10m])),\n    1e-9\n  )",
@@ -2607,7 +2600,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Why DNS queries are reaching upstream resolution.",
       "fieldConfig": {
@@ -2694,7 +2687,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "expr": "sum by (reason) (rate(powerdns_cache_misses_total[5m]))",
           "legendFormat": "{{reason}}",
@@ -2707,7 +2700,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Percentage of cache misses caused by expiration.",
       "fieldConfig": {
@@ -2765,7 +2758,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "100 * \n  sum(rate(powerdns_cache_misses_total{reason=\"expired\"}[10m]))\n  /\n  clamp_min(sum(rate(powerdns_cache_misses_total[10m])), 1e-9)",
@@ -2779,7 +2772,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Percentage of cache misses caused by not found.",
       "fieldConfig": {
@@ -2837,7 +2830,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "100 * \n  sum(rate(powerdns_cache_misses_total{reason=\"not_found\"}[10m]))\n  /\n  clamp_min(sum(rate(powerdns_cache_misses_total[10m])), 1e-9)",
@@ -2851,7 +2844,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Percentage of cache misses caused by expiration overall",
       "fieldConfig": {
@@ -2909,7 +2902,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "100 * \n  sum(powerdns_cache_misses_total{reason=\"expired\"})\n  /\n  clamp_min(sum(powerdns_cache_misses_total), 1e-9)",
@@ -2923,7 +2916,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Percentage of cache misses caused by not found overall.",
       "fieldConfig": {
@@ -2981,7 +2974,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "100 * \n  sum(powerdns_cache_misses_total{reason=\"not_found\"})\n  /\n  clamp_min(sum(powerdns_cache_misses_total), 1e-9)",
@@ -3008,7 +3001,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Fraction of DoH queries that were served by an in-flight request instead of making their own network call.",
       "fieldConfig": {
@@ -3064,7 +3057,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "powerdns_upstream_coalesce_rate{path=\"doh\"} * 100",
@@ -3077,7 +3070,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Fraction of DoT queries that were coalesced.",
       "fieldConfig": {
@@ -3133,7 +3126,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "powerdns_upstream_coalesce_rate{path=\"dot\"} * 100",
@@ -3146,7 +3139,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Fraction of incoming relay queries that were coalesced.",
       "fieldConfig": {
@@ -3202,7 +3195,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "powerdns_relay_coalesce_rate * 100",
@@ -3215,7 +3208,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Total real upstream network attempts (after coalescing).",
       "fieldConfig": {
@@ -3270,7 +3263,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum(powerdns_upstream_calls_total)",
@@ -3285,7 +3278,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Queries served by another caller's in-flight upstream request.",
       "fieldConfig": {
@@ -3340,7 +3333,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum(powerdns_upstream_coalesced_total)",
@@ -3355,7 +3348,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "fieldConfig": {
         "defaults": {
@@ -3407,7 +3400,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "disableTextWrap": false,
           "editorMode": "builder",
@@ -3426,7 +3419,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Background cache-refresh attempts that succeeded.",
       "fieldConfig": {
@@ -3481,7 +3474,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum(powerdns_cache_prefetch_total{result=\"success\"})",
@@ -3496,7 +3489,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Rate of real upstream network calls vs queries that were coalesced onto an in-flight request.",
       "fieldConfig": {
@@ -3583,7 +3576,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum by (path) (rate(powerdns_upstream_calls_total[5m]))",
@@ -3593,7 +3586,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum by (path) (rate(powerdns_upstream_coalesced_total[5m]))",
@@ -3607,7 +3600,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Background prefetch attempts (by outcome) and candidates that were skipped.",
       "fieldConfig": {
@@ -3694,7 +3687,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum by (result) (rate(powerdns_cache_prefetch_total[5m]))",
@@ -3704,7 +3697,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum by (reason) (rate(powerdns_cache_prefetch_skipped_total[5m]))",
@@ -3718,7 +3711,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Relay mode: real upstream resolutions performed by the relay vs coalesced incoming queries.",
       "fieldConfig": {
@@ -3805,7 +3798,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "rate(powerdns_relay_calls_total[5m])",
@@ -3815,7 +3808,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "rate(powerdns_relay_coalesced_total[5m])",
@@ -3829,7 +3822,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Latency of the relay resolving queries against its own upstreams (relay/both mode).",
       "fieldConfig": {
@@ -3917,7 +3910,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.50, sum by (le) (rate(powerdns_relay_server_latency_ms_bucket[5m])))",
@@ -3927,7 +3920,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.95, sum by (le) (rate(powerdns_relay_server_latency_ms_bucket[5m])))",
@@ -3937,7 +3930,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.99, sum by (le) (rate(powerdns_relay_server_latency_ms_bucket[5m])))",
@@ -3964,9 +3957,9 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
-      "description": "Share of past-expiry lookups whose age \u2264 30s (from the same rate/sum-by-le shape as the age heatmap). Use to size stale_while_revalidate_seconds.",
+      "description": "Fraction of past-expiry lookups whose age ≤ 30s (your current default window). Last 10m.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -4025,11 +4018,11 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
-          "expr": "100 *\nmax(\n  sum by (le) (rate(powerdns_cache_expired_entry_age_seconds_bucket[5m]))\n  and on (le)\n  label_replace(vector(1), \"le\", \"30\", \"__name__\", \".*\")\n)\n/\nclamp_min(sum(rate(powerdns_cache_expired_entry_age_seconds_count[5m])), 1e-9)",
-          "legendFormat": "\u226430s",
+          "expr": "100 *\n  sum(powerdns_cache_expired_entry_age_seconds_bucket{le=\"30.0\"})\n  /\n  clamp_min(sum(powerdns_cache_expired_entry_age_seconds_count), 1)",
+          "legendFormat": "__auto",
           "range": true,
           "refId": "A"
         }
@@ -4040,9 +4033,9 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
-      "description": "Share of past-expiry lookups whose age \u2264 60s (from the same rate/sum-by-le shape as the age heatmap). Use to size stale_while_revalidate_seconds.",
+      "description": "Fraction of past-expiry lookups with age ≤ 60s. Last 10m.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -4101,11 +4094,11 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
-          "expr": "100 *\nmax(\n  sum by (le) (rate(powerdns_cache_expired_entry_age_seconds_bucket[5m]))\n  and on (le)\n  label_replace(vector(1), \"le\", \"60\", \"__name__\", \".*\")\n)\n/\nclamp_min(sum(rate(powerdns_cache_expired_entry_age_seconds_count[5m])), 1e-9)",
-          "legendFormat": "\u226460s",
+          "expr": "100 *\n  sum(powerdns_cache_expired_entry_age_seconds_bucket{le=\"60.0\"})\n  /\n  clamp_min(sum(powerdns_cache_expired_entry_age_seconds_count), 1)",
+          "legendFormat": "__auto",
           "range": true,
           "refId": "A"
         }
@@ -4116,9 +4109,9 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
-      "description": "Share of past-expiry lookups whose age \u2264 180s (from the same rate/sum-by-le shape as the age heatmap). Use to size stale_while_revalidate_seconds.",
+      "description": "Fraction of past-expiry lookups with age ≤ 180s. Answers: if I set SWR=180s, what % of expired misses would become stale hits?",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -4177,11 +4170,11 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
-          "expr": "100 *\nmax(\n  sum by (le) (rate(powerdns_cache_expired_entry_age_seconds_bucket[5m]))\n  and on (le)\n  label_replace(vector(1), \"le\", \"180\", \"__name__\", \".*\")\n)\n/\nclamp_min(sum(rate(powerdns_cache_expired_entry_age_seconds_count[5m])), 1e-9)",
-          "legendFormat": "\u2264180s",
+          "expr": "100 *\n  sum(powerdns_cache_expired_entry_age_seconds_bucket{le=\"180.0\"})\n  /\n  clamp_min(sum(powerdns_cache_expired_entry_age_seconds_count), 1)",
+          "legendFormat": "__auto",
           "range": true,
           "refId": "A"
         }
@@ -4192,9 +4185,9 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
-      "description": "Share of past-expiry lookups whose age \u2264 300s (from the same rate/sum-by-le shape as the age heatmap). Use to size stale_while_revalidate_seconds.",
+      "description": "Fraction of past-expiry lookups with age ≤ 300s. Last 10m.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -4253,11 +4246,11 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
-          "expr": "100 *\nmax(\n  sum by (le) (rate(powerdns_cache_expired_entry_age_seconds_bucket[5m]))\n  and on (le)\n  label_replace(vector(1), \"le\", \"300\", \"__name__\", \".*\")\n)\n/\nclamp_min(sum(rate(powerdns_cache_expired_entry_age_seconds_count[5m])), 1e-9)",
-          "legendFormat": "\u2264300s",
+          "expr": "100 *\n  sum(powerdns_cache_expired_entry_age_seconds_bucket{le=\"300.0\"})\n  /\n  clamp_min(sum(powerdns_cache_expired_entry_age_seconds_count), 1)",
+          "legendFormat": "__auto",
           "range": true,
           "refId": "A"
         }
@@ -4268,9 +4261,9 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
-      "description": "Mean age of expired entries at lookup time (last 10m). Unbiased \u2014 recorded before SWR vs miss decision.",
+      "description": "Mean age of expired entries at lookup time (last 10m). Unbiased — recorded before SWR vs miss decision.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -4327,7 +4320,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum(rate(powerdns_cache_expired_entry_age_seconds_sum[10m]))\n  /\n  clamp_min(sum(rate(powerdns_cache_expired_entry_age_seconds_count[10m])), 1e-9)",
@@ -4342,7 +4335,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Rate of past-expiry cache lookups (the population this histogram samples).",
       "fieldConfig": {
@@ -4397,7 +4390,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum(rate(powerdns_cache_expired_entry_age_seconds_count[10m]))",
@@ -4412,7 +4405,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "How old expired entries are when looked up. If P90 is under your SWR window, most expired traffic can be served stale.",
       "fieldConfig": {
@@ -4500,7 +4493,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.50, sum by (le) (rate(powerdns_cache_expired_entry_age_seconds_bucket[5m])))",
@@ -4510,7 +4503,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.90, sum by (le) (rate(powerdns_cache_expired_entry_age_seconds_bucket[5m])))",
@@ -4520,7 +4513,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "histogram_quantile(0.99, sum by (le) (rate(powerdns_cache_expired_entry_age_seconds_bucket[5m])))",
@@ -4534,7 +4527,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "What fraction of expired lookups would be covered by each SWR window. Use this to pick stale_while_revalidate_seconds without guessing.",
       "fieldConfig": {
@@ -4622,66 +4615,66 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
-          "expr": "100 *\nmax(\n  sum by (le) (rate(powerdns_cache_expired_entry_age_seconds_bucket[5m]))\n  and on (le)\n  label_replace(vector(1), \"le\", \"30\", \"__name__\", \".*\")\n)\n/\nclamp_min(sum(rate(powerdns_cache_expired_entry_age_seconds_count[5m])), 1e-9)",
-          "legendFormat": "\u226430s",
+          "expr": "100 *\n  sum(rate(powerdns_cache_expired_entry_age_seconds_bucket{le=\"30.0\"}[10m]))\n  /\n  clamp_min(sum(rate(powerdns_cache_expired_entry_age_seconds_count[10m])), 1e-9)",
+          "legendFormat": "≤30s",
           "range": true,
           "refId": "A"
         },
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
-          "expr": "100 *\nmax(\n  sum by (le) (rate(powerdns_cache_expired_entry_age_seconds_bucket[5m]))\n  and on (le)\n  label_replace(vector(1), \"le\", \"60\", \"__name__\", \".*\")\n)\n/\nclamp_min(sum(rate(powerdns_cache_expired_entry_age_seconds_count[5m])), 1e-9)",
-          "legendFormat": "\u226460s",
+          "expr": "100 *\n  sum(rate(powerdns_cache_expired_entry_age_seconds_bucket{le=\"60.0\"}[10m]))\n  /\n  clamp_min(sum(rate(powerdns_cache_expired_entry_age_seconds_count[10m])), 1e-9)",
+          "legendFormat": "≤60s",
           "range": true,
           "refId": "B"
         },
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
-          "expr": "100 *\nmax(\n  sum by (le) (rate(powerdns_cache_expired_entry_age_seconds_bucket[5m]))\n  and on (le)\n  label_replace(vector(1), \"le\", \"120\", \"__name__\", \".*\")\n)\n/\nclamp_min(sum(rate(powerdns_cache_expired_entry_age_seconds_count[5m])), 1e-9)",
-          "legendFormat": "\u2264120s",
+          "expr": "100 *\n  sum(rate(powerdns_cache_expired_entry_age_seconds_bucket{le=\"120.0\"}[10m]))\n  /\n  clamp_min(sum(rate(powerdns_cache_expired_entry_age_seconds_count[10m])), 1e-9)",
+          "legendFormat": "≤120s",
           "range": true,
           "refId": "C"
         },
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
-          "expr": "100 *\nmax(\n  sum by (le) (rate(powerdns_cache_expired_entry_age_seconds_bucket[5m]))\n  and on (le)\n  label_replace(vector(1), \"le\", \"180\", \"__name__\", \".*\")\n)\n/\nclamp_min(sum(rate(powerdns_cache_expired_entry_age_seconds_count[5m])), 1e-9)",
-          "legendFormat": "\u2264180s",
+          "expr": "100 *\n  sum(rate(powerdns_cache_expired_entry_age_seconds_bucket{le=\"180.0\"}[10m]))\n  /\n  clamp_min(sum(rate(powerdns_cache_expired_entry_age_seconds_count[10m])), 1e-9)",
+          "legendFormat": "≤180s",
           "range": true,
           "refId": "D"
         },
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
-          "expr": "100 *\nmax(\n  sum by (le) (rate(powerdns_cache_expired_entry_age_seconds_bucket[5m]))\n  and on (le)\n  label_replace(vector(1), \"le\", \"300\", \"__name__\", \".*\")\n)\n/\nclamp_min(sum(rate(powerdns_cache_expired_entry_age_seconds_count[5m])), 1e-9)",
-          "legendFormat": "\u2264300s",
+          "expr": "100 *\n  sum(rate(powerdns_cache_expired_entry_age_seconds_bucket{le=\"300.0\"}[10m]))\n  /\n  clamp_min(sum(rate(powerdns_cache_expired_entry_age_seconds_count[10m])), 1e-9)",
+          "legendFormat": "≤300s",
           "range": true,
           "refId": "E"
         },
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
-          "expr": "100 *\nmax(\n  sum by (le) (rate(powerdns_cache_expired_entry_age_seconds_bucket[5m]))\n  and on (le)\n  label_replace(vector(1), \"le\", \"600\", \"__name__\", \".*\")\n)\n/\nclamp_min(sum(rate(powerdns_cache_expired_entry_age_seconds_count[5m])), 1e-9)",
-          "legendFormat": "\u2264600s",
+          "expr": "100 *\n  sum(rate(powerdns_cache_expired_entry_age_seconds_bucket{le=\"600.0\"}[10m]))\n  /\n  clamp_min(sum(rate(powerdns_cache_expired_entry_age_seconds_count[10m])), 1e-9)",
+          "legendFormat": "≤600s",
           "range": true,
           "refId": "F"
         }
@@ -4692,9 +4685,9 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
-      "description": "Age-at-lookup distribution for past-expiry cache hits. Y-axis = seconds past TTL. Density shows where expired traffic concentrates \u2014 set SWR above the bulk of the mass.",
+      "description": "Age-at-lookup distribution for past-expiry cache hits. Y-axis = seconds past TTL. Density shows where expired traffic concentrates — set SWR above the bulk of the mass.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -4736,7 +4729,7 @@
           "color": "rgba(255,0,255,0.7)"
         },
         "filterValues": {
-          "le": 1e-09
+          "le": 1e-9
         },
         "legend": {
           "show": true
@@ -4760,7 +4753,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum by (le) (rate(powerdns_cache_expired_entry_age_seconds_bucket[5m]))",
@@ -4789,7 +4782,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Cumulative effective cache hit rate: (fresh hits + stale hits) / total lookups. Includes serving stale content.",
       "fieldConfig": {
@@ -4847,7 +4840,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "powerdns_cache_effective_hit_rate * 100",
@@ -4860,7 +4853,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Total stale cache hits (served expired entries while revalidating or as fallback).",
       "fieldConfig": {
@@ -4915,7 +4908,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "powerdns_cache_stale_hits_total",
@@ -4928,7 +4921,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Background revalidations of stale cache entries that were attempted.",
       "fieldConfig": {
@@ -4979,7 +4972,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "powerdns_cache_stale_revalidations_total",
@@ -4992,7 +4985,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Stale revalidations that failed (upstream error or timeout). High values may indicate upstream issues.",
       "fieldConfig": {
@@ -5051,7 +5044,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "powerdns_cache_stale_revalidation_failures_total",
@@ -5064,7 +5057,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Percentage of revalidations that failed.",
       "fieldConfig": {
@@ -5122,7 +5115,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "100 *\n  sum(powerdns_cache_stale_revalidation_failures_total)\n  /\n  clamp_min(sum(powerdns_cache_stale_revalidations_total), 1e-9)",
@@ -5136,7 +5129,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Rate of stale hits served, background revalidations, and revalidation failures.",
       "fieldConfig": {
@@ -5224,7 +5217,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "rate(powerdns_cache_stale_hits_total[5m])",
@@ -5234,7 +5227,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "rate(powerdns_cache_stale_revalidations_total[5m])",
@@ -5244,7 +5237,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "rate(powerdns_cache_stale_revalidation_failures_total[5m])",
@@ -5258,7 +5251,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Distribution of cache lookup outcomes: fresh hit, stale hit, miss.",
       "fieldConfig": {
@@ -5319,7 +5312,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "powerdns_cache_hits_total",
@@ -5329,7 +5322,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "powerdns_cache_stale_hits_total",
@@ -5339,7 +5332,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum(powerdns_cache_misses_total)",
@@ -5353,7 +5346,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "What fraction of all cache hits were stale (served expired content).",
       "fieldConfig": {
@@ -5447,7 +5440,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "100 *\n  sum(rate(powerdns_cache_stale_hits_total[10m]))\n  /\n  clamp_min(\n    sum(rate(powerdns_cache_hits_total[10m])) + sum(rate(powerdns_cache_stale_hits_total[10m])),\n    1e-9\n  )",
@@ -5461,7 +5454,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Success rate of background stale revalidations.",
       "fieldConfig": {
@@ -5555,7 +5548,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "100 *\n  (sum(rate(powerdns_cache_stale_revalidations_total[10m])) - sum(rate(powerdns_cache_stale_revalidation_failures_total[10m])))\n  /\n  clamp_min(sum(rate(powerdns_cache_stale_revalidations_total[10m])), 1e-9)",
@@ -5582,7 +5575,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "DNS upstream resolution latency percentiles by path (doh / dot).",
       "fieldConfig": {
@@ -5670,7 +5663,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "expr": "histogram_quantile(0.50, sum by (le, path) (rate(powerdns_upstream_latency_ms_bucket[5m])))",
           "legendFormat": "P50 {{path}}",
@@ -5679,7 +5672,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "expr": "histogram_quantile(0.95, sum by (le, path) (rate(powerdns_upstream_latency_ms_bucket[5m])))",
           "legendFormat": "P95 {{path}}",
@@ -5688,7 +5681,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "expr": "histogram_quantile(0.99, sum by (le, path) (rate(powerdns_upstream_latency_ms_bucket[5m])))",
           "legendFormat": "P99 {{path}}",
@@ -5701,7 +5694,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Total real upstream network attempts (after coalescing) since process start.",
       "fieldConfig": {
@@ -5756,7 +5749,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum(powerdns_upstream_calls_total)",
@@ -5769,7 +5762,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Average latency of DoH upstream requests (last 5m).",
       "fieldConfig": {
@@ -5825,7 +5818,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum(rate(powerdns_upstream_latency_ms_sum{path=\"doh\"}[5m]))\n  /\n  clamp_min(sum(rate(powerdns_upstream_latency_ms_count{path=\"doh\"}[5m])), 1e-9)",
@@ -5838,7 +5831,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Average latency of DoT upstream requests (last 5m).",
       "fieldConfig": {
@@ -5890,7 +5883,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum(rate(powerdns_upstream_latency_ms_sum{path=\"dot\"}[5m]))\n  /\n  clamp_min(sum(rate(powerdns_upstream_latency_ms_count{path=\"dot\"}[5m])), 1e-9)",
@@ -5903,7 +5896,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Average latency across all upstream paths (last 5m). Note: only doh/dot paths are currently exposed.",
       "fieldConfig": {
@@ -5955,7 +5948,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum(rate(powerdns_upstream_latency_ms_sum[5m]))\n  /\n  clamp_min(sum(rate(powerdns_upstream_latency_ms_count[5m])), 1e-9)",
@@ -5982,7 +5975,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Latency distribution of DoH upstream calls over time. Y-axis = latency bucket (ms). Darker/warmer = more density. Watch for mass shifting into higher buckets when the tunnel or upstream degrades.",
       "fieldConfig": {
@@ -6026,7 +6019,7 @@
           "color": "rgba(255,0,255,0.7)"
         },
         "filterValues": {
-          "le": 1e-09
+          "le": 1e-9
         },
         "legend": {
           "show": true
@@ -6050,7 +6043,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum by (le) (rate(powerdns_upstream_latency_ms_bucket{path=\"doh\"}[5m]))",
@@ -6066,7 +6059,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Latency distribution of fallback paths (DoT + plain). Useful to see whether fallbacks are actually faster or just more painful when DoH is struggling.",
       "fieldConfig": {
@@ -6110,7 +6103,7 @@
           "color": "rgba(255,0,255,0.7)"
         },
         "filterValues": {
-          "le": 1e-09
+          "le": 1e-9
         },
         "legend": {
           "show": true
@@ -6134,7 +6127,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum by (le) (rate(powerdns_upstream_latency_ms_bucket{path=~\"dot|plain\"}[5m]))",
@@ -6150,7 +6143,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Query rate by resolution strategy over time. Shows when cache is carrying the load vs when upstream (doh/dot/plain/failed) is hit.",
       "fieldConfig": {
@@ -6204,7 +6197,7 @@
           "color": "rgba(255,0,255,0.7)"
         },
         "filterValues": {
-          "le": 1e-09
+          "le": 1e-9
         },
         "legend": {
           "show": true
@@ -6228,7 +6221,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum(rate(powerdns_queries_total{strategy=\"cache\"}[1m]))",
@@ -6239,7 +6232,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum(rate(powerdns_queries_total{strategy=\"doh\"}[1m]))",
@@ -6250,7 +6243,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum(rate(powerdns_queries_total{strategy=\"dot\"}[1m]))",
@@ -6261,7 +6254,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum(rate(powerdns_queries_total{strategy=\"plain\"}[1m]))",
@@ -6272,7 +6265,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum(rate(powerdns_queries_total{strategy=\"failed\"}[1m]))",
@@ -6287,7 +6280,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Cache lookup outcomes over time: fresh hits, stale hits, and misses by reason. Density shows which outcome dominates in each period.",
       "fieldConfig": {
@@ -6341,7 +6334,7 @@
           "color": "rgba(255,0,255,0.7)"
         },
         "filterValues": {
-          "le": 1e-09
+          "le": 1e-9
         },
         "legend": {
           "show": true
@@ -6365,7 +6358,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "rate(powerdns_cache_hits_total[1m])",
@@ -6376,7 +6369,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "rate(powerdns_cache_stale_hits_total[1m])",
@@ -6387,7 +6380,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum(rate(powerdns_cache_misses_total{reason=\"expired\"}[1m]))",
@@ -6398,7 +6391,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum(rate(powerdns_cache_misses_total{reason=\"not_found\"}[1m]))",
@@ -6413,7 +6406,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "P1809F7CD0C75ACF3"
       },
       "description": "Combined latency distribution across every upstream path. Best single view for 'is the network path healthy right now?'. Mass in the upper buckets = pain.",
       "fieldConfig": {
@@ -6457,7 +6450,7 @@
           "color": "rgba(255,0,255,0.7)"
         },
         "filterValues": {
-          "le": 1e-09
+          "le": 1e-9
         },
         "legend": {
           "show": true
@@ -6481,7 +6474,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
           "expr": "sum by (le) (rate(powerdns_upstream_latency_ms_bucket[5m]))",
@@ -6507,7 +6500,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "description": "Current number of cached answers versus configured capacity.",
           "fieldConfig": {
@@ -6609,7 +6602,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${datasource}"
+                "uid": "P1809F7CD0C75ACF3"
               },
               "expr": "powerdns_cache_entries",
               "legendFormat": "entries",
@@ -6618,7 +6611,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${datasource}"
+                "uid": "P1809F7CD0C75ACF3"
               },
               "expr": "powerdns_cache_capacity",
               "legendFormat": "capacity",
@@ -6631,7 +6624,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "description": "Total cache entries removed to make room (by reason) since process start.",
           "fieldConfig": {
@@ -6683,7 +6676,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${datasource}"
+                "uid": "P1809F7CD0C75ACF3"
               },
               "expr": "sum(powerdns_cache_evictions_total)",
               "refId": "A"
@@ -6695,7 +6688,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "P1809F7CD0C75ACF3"
           },
           "description": "Rate at which cache entries are being evicted, by reason.",
           "fieldConfig": {
@@ -6779,7 +6772,7 @@
             {
               "datasource": {
                 "type": "prometheus",
-                "uid": "${datasource}"
+                "uid": "P1809F7CD0C75ACF3"
               },
               "expr": "sum by (reason) (rate(powerdns_cache_evictions_total[5m]))",
               "legendFormat": "{{reason}}",
@@ -6794,8 +6787,9 @@
       "type": "row"
     }
   ],
+  "preload": false,
   "refresh": "1m",
-  "schemaVersion": 39,
+  "schemaVersion": 41,
   "tags": [
     "power-dns",
     "dns",
@@ -6804,86 +6798,15 @@
     "networking"
   ],
   "templating": {
-    "list": [
-      {
-        "current": {},
-        "hide": 0,
-        "includeAll": false,
-        "label": "Datasource",
-        "multi": false,
-        "name": "datasource",
-        "options": [],
-        "query": "prometheus",
-        "queryValue": "",
-        "refresh": 1,
-        "regex": "",
-        "skipUrlSync": false,
-        "type": "datasource"
-      }
-    ]
+    "list": []
   },
   "time": {
-    "from": "now-6h",
+    "from": "now-3h",
     "to": "now"
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "Power-DNS \u2014 Resolver & Cache",
-  "uid": "powerdns-resolver",
-  "version": 1,
-  "__inputs": [
-    {
-      "name": "DS_PROMETHEUS",
-      "label": "Prometheus",
-      "description": "Prometheus datasource scraping Power-DNS /metrics",
-      "type": "datasource",
-      "pluginId": "prometheus",
-      "pluginName": "Prometheus"
-    }
-  ],
-  "__elements": {},
-  "__requires": [
-    {
-      "type": "grafana",
-      "id": "grafana",
-      "name": "Grafana",
-      "version": "10.0.0"
-    },
-    {
-      "type": "datasource",
-      "id": "prometheus",
-      "name": "Prometheus",
-      "version": "1.0.0"
-    },
-    {
-      "type": "panel",
-      "id": "stat",
-      "name": "Stat",
-      "version": ""
-    },
-    {
-      "type": "panel",
-      "id": "gauge",
-      "name": "Gauge",
-      "version": ""
-    },
-    {
-      "type": "panel",
-      "id": "timeseries",
-      "name": "Time series",
-      "version": ""
-    },
-    {
-      "type": "panel",
-      "id": "piechart",
-      "name": "Pie chart",
-      "version": ""
-    },
-    {
-      "type": "panel",
-      "id": "heatmap",
-      "name": "Heatmap",
-      "version": ""
-    }
-  ]
+  "title": "Power-DNS — Resolver & Cache v3",
+  "uid": "powerdns-resolver-V3",
+  "version": 5
 }

@@ -44,16 +44,35 @@ type Upstream interface {
 // is exactly the "50 clients ask for the same freshly-expired domain at
 // once" scenario a public relay is most likely to actually see.
 type Server struct {
-	Upstream        Upstream
-	Logger          *slog.Logger
-	Metrics         *metrics.Registry
+	Upstream Upstream
+	Logger   *slog.Logger
+	Metrics  *metrics.Registry
+
+	// secMu protects AuthToken, AllowedSuffixes, and limiter for hot-reload.
+	secMu           sync.RWMutex
 	AuthToken       string   // if set, require "Authorization: Bearer <token>"
 	AllowedSuffixes []string // if non-empty, only resolve names under these suffixes
-
-	limiter *rateLimiter
+	limiter         *rateLimiter
 
 	inflightMu sync.Mutex
 	inflight   map[string]*inflightCall
+}
+
+// ApplySecurity updates auth token, domain allow-list, and rate limit without
+// restarting the listener (used on SIGHUP config reload).
+func (s *Server) ApplySecurity(authToken string, allowedSuffixes []string, ratePerMinute int) {
+	s.secMu.Lock()
+	defer s.secMu.Unlock()
+	s.AuthToken = authToken
+	s.AllowedSuffixes = append([]string(nil), allowedSuffixes...)
+	s.limiter = newRateLimiter(ratePerMinute, time.Minute)
+}
+
+// ApplyUpstream swaps the upstream resolver used for relay queries (hot-reload).
+func (s *Server) ApplyUpstream(up Upstream) {
+	s.secMu.Lock()
+	defer s.secMu.Unlock()
+	s.Upstream = up
 }
 
 // inflightCall represents one real, currently-running (or just-finished)
@@ -84,11 +103,16 @@ func NewServer(up Upstream, logger *slog.Logger, reg *metrics.Registry, authToke
 // ServeHTTP implements RFC 8484: a GET with a base64url "dns" query
 // parameter, or a POST with an application/dns-message body.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if s.AuthToken != "" && !validBearer(r, s.AuthToken) {
+	s.secMu.RLock()
+	token := s.AuthToken
+	limiter := s.limiter
+	s.secMu.RUnlock()
+
+	if token != "" && !validBearer(r, token) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if s.limiter != nil && !s.limiter.Allow(clientIP(r)) {
+	if limiter != nil && !limiter.Allow(clientIP(r)) {
 		http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 		return
 	}
@@ -219,7 +243,14 @@ func (s *Server) resolveCoalesced(ctx context.Context, reqMsg *dns.Msg, q dns.Qu
 		}()
 
 		start := time.Now()
-		call.resp, call.err = s.Upstream.Resolve(ctx, reqMsg)
+		s.secMu.RLock()
+		up := s.Upstream
+		s.secMu.RUnlock()
+		if up == nil {
+			call.err = fmt.Errorf("no upstream configured")
+		} else {
+			call.resp, call.err = up.Resolve(ctx, reqMsg)
+		}
 		if s.Metrics != nil {
 			s.Metrics.ObserveRelayServerLatency(time.Since(start))
 			s.Metrics.IncRelayCall()
@@ -247,11 +278,14 @@ func restampReply(shared *dns.Msg, req *dns.Msg) *dns.Msg {
 }
 
 func (s *Server) allowed(qname string) bool {
-	if len(s.AllowedSuffixes) == 0 {
+	s.secMu.RLock()
+	suffixes := s.AllowedSuffixes
+	s.secMu.RUnlock()
+	if len(suffixes) == 0 {
 		return true
 	}
 	qname = strings.ToLower(qname)
-	for _, suffix := range s.AllowedSuffixes {
+	for _, suffix := range suffixes {
 		if strings.HasSuffix(qname, strings.ToLower(dns.Fqdn(suffix))) {
 			return true
 		}

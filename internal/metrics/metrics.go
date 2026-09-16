@@ -85,6 +85,15 @@ type Registry struct {
 	upstreamLatencyMs  map[string]*histogram // labeled by path: relay/doh/dot/plain
 	relayServerLatency *histogram            // the relay's own upstream-resolution time (server side, not a "path")
 
+	// expiredEntryAge records, for every cache lookup that finds an entry
+	// past its TTL (whether stale-while-revalidate ends up serving it or
+	// it counts as a genuine miss), how many seconds past expiry it was.
+	// This is the distribution to look at when choosing
+	// cache.stale_while_revalidate_seconds: it's unbiased by whatever
+	// window is currently configured, since it's recorded before that
+	// decision is made -- see internal/cache.Cache.Get.
+	expiredEntryAge *histogram
+
 	// upstreamCalls counts real network attempts per path -- exactly the
 	// attempts singleflight actually let through. upstreamCoalesced counts
 	// callers that instead got a shared result from someone else's
@@ -111,6 +120,23 @@ type Registry struct {
 	relayCalls     int64
 	relayCoalesced int64
 
+	// staleHits counts Get calls served from an expired-but-still-usable
+	// entry (stale-while-revalidate). staleRevalidations/
+	// staleRevalidationFailures count the background refreshes those hits
+	// trigger, by outcome. A stale hit is not counted in cacheHits -- see
+	// the effective-hit-rate gauge in writeCacheMetrics for the combined
+	// "served locally" view.
+	staleHits                 int64
+	staleRevalidations        int64
+	staleRevalidationFailures int64
+
+	// prefetchProtectedHits counts fresh cache hits served from an entry
+	// whose last fill was a successful background prefetch. This is the
+	// prefetch analogue of staleHits: it attributes client-visible hits to
+	// prior prefetch work, so you can measure whether prefetch is actually
+	// preventing misses rather than only counting refresh attempts.
+	prefetchProtectedHits int64
+
 	startedAt time.Time
 	cacheHits int64
 
@@ -130,6 +156,7 @@ func New() *Registry {
 		cacheEvictions:     make(map[string]*int64),
 		upstreamLatencyMs:  make(map[string]*histogram),
 		relayServerLatency: newHistogram(latencyBuckets),
+		expiredEntryAge:    newHistogram(expiredAgeBuckets),
 		upstreamCalls:      make(map[string]*int64),
 		upstreamCoalesced:  make(map[string]*int64),
 		prefetchTotal:      make(map[string]*int64),
@@ -139,6 +166,12 @@ func New() *Registry {
 }
 
 var latencyBuckets = []float64{5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000}
+
+// expiredAgeBuckets are in seconds, not milliseconds like latencyBuckets --
+// this histogram measures how long after expiry a repeat query arrives,
+// which is a "tens of seconds to tens of minutes" question, not a
+// millisecond one.
+var expiredAgeBuckets = []float64{1, 5, 15, 30, 60, 120, 180, 300, 600, 1800, 3600}
 
 // IncQuery records one resolved (or failed) query for the given strategy
 // label, e.g. "cache", "relay", "doh", "dot", "plain", "records", or
@@ -162,6 +195,25 @@ func (r *Registry) IncCacheMiss(reason string) {
 // labeled with why (currently always EvictionLRU).
 func (r *Registry) IncCacheEviction(reason string) {
 	atomic.AddInt64(r.counter(&r.mu, r.cacheEvictions, reason), 1)
+}
+
+// IncStaleHit records one Get call served from an expired-but-still-usable
+// entry (stale-while-revalidate), rather than either a fresh hit or a
+// miss.
+func (r *Registry) IncStaleHit() {
+	atomic.AddInt64(&r.staleHits, 1)
+}
+
+// IncStaleRevalidation records one successful background refresh triggered
+// by a stale hit.
+func (r *Registry) IncStaleRevalidation() {
+	atomic.AddInt64(&r.staleRevalidations, 1)
+}
+
+// IncStaleRevalidationFailure records one failed background refresh
+// triggered by a stale hit.
+func (r *Registry) IncStaleRevalidationFailure() {
+	atomic.AddInt64(&r.staleRevalidationFailures, 1)
 }
 
 // SetCacheSizeFunc registers a callback polled at scrape time to report
@@ -197,6 +249,16 @@ func (r *Registry) ObserveRelayServerLatency(d time.Duration) {
 	r.relayServerLatency.observe(float64(d.Milliseconds()))
 }
 
+// ObserveExpiredEntryAge records how many seconds past its expiry time a
+// cache entry was when looked up again, for every such lookup -- whether
+// stale-while-revalidate ends up serving it or it counts as a genuine
+// miss. Use this to size cache.stale_while_revalidate_seconds: it shows
+// what fraction of repeat queries for an already-expired entry arrive
+// within any given number of seconds after expiry.
+func (r *Registry) ObserveExpiredEntryAge(d time.Duration) {
+	r.expiredEntryAge.observe(d.Seconds())
+}
+
 // IncUpstreamCall records one real network attempt at the given upstream
 // path -- exactly the attempts that singleflight actually let through to
 // the network, once per coalesced group rather than once per caller.
@@ -222,6 +284,15 @@ func (r *Registry) IncPrefetch(result string) {
 // PrefetchSkipInFlight or PrefetchSkipCooldown.
 func (r *Registry) IncPrefetchSkipped(reason string) {
 	atomic.AddInt64(r.counter(&r.mu, r.prefetchSkipped, reason), 1)
+}
+
+// IncPrefetchProtectedHit records one fresh cache hit served from an entry
+// that was last filled by a successful background prefetch (not by a
+// client-driven resolve or a stale-while-revalidate refresh). Together with
+// powerdns_cache_hits_total this answers "what fraction of fresh hits did
+// prefetch actually protect."
+func (r *Registry) IncPrefetchProtectedHit() {
+	atomic.AddInt64(&r.prefetchProtectedHits, 1)
 }
 
 // IncRelayCall records one real upstream resolution the relay performed for
@@ -268,6 +339,10 @@ func (r *Registry) WriteProm(w *strings.Builder) {
 	fmt.Fprintf(w, "# HELP powerdns_relay_server_latency_ms Time the relay itself spent resolving a query against its own upstreams (relay/both mode only).\n")
 	fmt.Fprintf(w, "# TYPE powerdns_relay_server_latency_ms histogram\n")
 	r.relayServerLatency.writeProm(w, "powerdns_relay_server_latency_ms", "")
+
+	fmt.Fprintf(w, "# HELP powerdns_cache_expired_entry_age_seconds Seconds past expiry a cache entry was when looked up again, for every such lookup regardless of outcome. Use this to size cache.stale_while_revalidate_seconds.\n")
+	fmt.Fprintf(w, "# TYPE powerdns_cache_expired_entry_age_seconds histogram\n")
+	r.expiredEntryAge.writeProm(w, "powerdns_cache_expired_entry_age_seconds", "")
 }
 
 func (r *Registry) writeQueriesTotal(w *strings.Builder) {
@@ -284,6 +359,9 @@ func (r *Registry) writeQueriesTotal(w *strings.Builder) {
 
 func (r *Registry) writeCacheMetrics(w *strings.Builder) {
 	hits := atomic.LoadInt64(&r.cacheHits)
+	staleHits := atomic.LoadInt64(&r.staleHits)
+	staleRevalidations := atomic.LoadInt64(&r.staleRevalidations)
+	staleRevalidationFailures := atomic.LoadInt64(&r.staleRevalidationFailures)
 
 	r.mu.Lock()
 	missReasons := sortedKeys(r.cacheMissesTotal)
@@ -295,9 +373,21 @@ func (r *Registry) writeCacheMetrics(w *strings.Builder) {
 	sizeFunc := r.cacheSizeFunc
 	r.mu.Unlock()
 
-	fmt.Fprintf(w, "# HELP powerdns_cache_hits_total Answer cache lookups that found a valid entry.\n")
+	fmt.Fprintf(w, "# HELP powerdns_cache_hits_total Answer cache lookups that found a fresh (non-expired) entry.\n")
 	fmt.Fprintf(w, "# TYPE powerdns_cache_hits_total counter\n")
 	fmt.Fprintf(w, "powerdns_cache_hits_total %d\n", hits)
+
+	fmt.Fprintf(w, "# HELP powerdns_cache_stale_hits_total Answer cache lookups served from an expired-but-still-usable entry (stale-while-revalidate). Always zero unless cache.stale_while_revalidate_seconds is set.\n")
+	fmt.Fprintf(w, "# TYPE powerdns_cache_stale_hits_total counter\n")
+	fmt.Fprintf(w, "powerdns_cache_stale_hits_total %d\n", staleHits)
+
+	fmt.Fprintf(w, "# HELP powerdns_cache_stale_revalidations_total Background refreshes triggered by a stale hit that completed successfully.\n")
+	fmt.Fprintf(w, "# TYPE powerdns_cache_stale_revalidations_total counter\n")
+	fmt.Fprintf(w, "powerdns_cache_stale_revalidations_total %d\n", staleRevalidations)
+
+	fmt.Fprintf(w, "# HELP powerdns_cache_stale_revalidation_failures_total Background refreshes triggered by a stale hit that failed.\n")
+	fmt.Fprintf(w, "# TYPE powerdns_cache_stale_revalidation_failures_total counter\n")
+	fmt.Fprintf(w, "powerdns_cache_stale_revalidation_failures_total %d\n", staleRevalidationFailures)
 
 	fmt.Fprintf(w, "# HELP powerdns_cache_misses_total Answer cache lookups that found no valid entry, by reason.\n")
 	fmt.Fprintf(w, "# TYPE powerdns_cache_misses_total counter\n")
@@ -315,8 +405,9 @@ func (r *Registry) writeCacheMetrics(w *strings.Builder) {
 	// start), as a quick-glance gauge. For a time-windowed rate, compute
 	// rate(powerdns_cache_hits_total[5m]) / (rate(...hits...) +
 	// rate(...misses...)) in Prometheus instead -- this gauge is a
-	// convenience, not a substitute for that.
-	fmt.Fprintf(w, "# HELP powerdns_cache_hit_rate Cumulative cache hit rate (hits / (hits + misses)) since process start.\n")
+	// convenience, not a substitute for that. Deliberately excludes stale
+	// hits -- see powerdns_cache_effective_hit_rate for the combined view.
+	fmt.Fprintf(w, "# HELP powerdns_cache_hit_rate Cumulative fresh-hit rate (hits / (hits + misses)) since process start. Excludes stale hits -- see powerdns_cache_effective_hit_rate for hits+stale combined.\n")
 	fmt.Fprintf(w, "# TYPE powerdns_cache_hit_rate gauge\n")
 	total := hits + totalMisses
 	rate := 0.0
@@ -324,6 +415,19 @@ func (r *Registry) writeCacheMetrics(w *strings.Builder) {
 		rate = float64(hits) / float64(total)
 	}
 	fmt.Fprintf(w, "powerdns_cache_hit_rate %g\n", rate)
+
+	// The more meaningful number for "what fraction of queries did the
+	// caller experience as instant, locally-served answers": a stale hit
+	// is, from the caller's point of view, indistinguishable from a fresh
+	// one -- both return immediately with no upstream round trip.
+	fmt.Fprintf(w, "# HELP powerdns_cache_effective_hit_rate Cumulative locally-served rate ((hits + stale hits) / (hits + stale hits + misses)) since process start -- what fraction of queries the caller experienced as instant, whether or not the answer happened to be fresh.\n")
+	fmt.Fprintf(w, "# TYPE powerdns_cache_effective_hit_rate gauge\n")
+	effectiveTotal := hits + staleHits + totalMisses
+	effectiveRate := 0.0
+	if effectiveTotal > 0 {
+		effectiveRate = float64(hits+staleHits) / float64(effectiveTotal)
+	}
+	fmt.Fprintf(w, "powerdns_cache_effective_hit_rate %g\n", effectiveRate)
 
 	if sizeFunc != nil {
 		entries, capacity := sizeFunc()
@@ -454,6 +558,11 @@ func (r *Registry) writePrefetchMetrics(w *strings.Builder) {
 	for _, reason := range skipReasons {
 		fmt.Fprintf(w, "powerdns_cache_prefetch_skipped_total{reason=%q} %d\n", reason, skipCounts[reason])
 	}
+
+	protected := atomic.LoadInt64(&r.prefetchProtectedHits)
+	fmt.Fprintf(w, "# HELP powerdns_cache_prefetch_protected_hits_total Fresh cache hits served from an entry last filled by a successful background prefetch. The prefetch analogue of powerdns_cache_stale_hits_total: attributes client-visible hits to prior prefetch work.\n")
+	fmt.Fprintf(w, "# TYPE powerdns_cache_prefetch_protected_hits_total counter\n")
+	fmt.Fprintf(w, "powerdns_cache_prefetch_protected_hits_total %d\n", protected)
 }
 
 func unionKeys(maps ...map[string]*int64) map[string]struct{} {

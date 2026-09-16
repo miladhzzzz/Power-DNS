@@ -199,17 +199,17 @@ func TestPrefetchRefreshesPopularSoonToExpireEntry(t *testing.T) {
 	}
 
 	c := New(Options{
-		MaxEntries:  10,
-		MinTTL:      10 * time.Millisecond,
-		MaxTTL:      time.Hour,
-		NegativeTTL: time.Second,
-		Metrics:     reg,
+		MaxEntries:     10,
+		MinTTL:         10 * time.Millisecond,
+		MaxTTL:         time.Hour,
+		NegativeTTL:    time.Second,
+		Metrics:        reg,
+		Refresh:        refresh,
+		RefreshTimeout: time.Second,
 		Prefetch: PrefetchOptions{
 			Enabled:   true,
 			Threshold: 50 * time.Millisecond, // "soon to expire" = less than this remaining
 			MinHits:   2,                     // needs at least 2 hits to count as popular
-			Refresh:   refresh,
-			Timeout:   time.Second,
 		},
 	})
 
@@ -258,17 +258,17 @@ func TestPrefetchFailureIsRecorded(t *testing.T) {
 	}
 
 	c := New(Options{
-		MaxEntries:  10,
-		MinTTL:      10 * time.Millisecond,
-		MaxTTL:      time.Hour,
-		NegativeTTL: time.Second,
-		Metrics:     reg,
+		MaxEntries:     10,
+		MinTTL:         10 * time.Millisecond,
+		MaxTTL:         time.Hour,
+		NegativeTTL:    time.Second,
+		Metrics:        reg,
+		Refresh:        refresh,
+		RefreshTimeout: time.Second,
 		Prefetch: PrefetchOptions{
 			Enabled:   true,
 			Threshold: 50 * time.Millisecond,
 			MinHits:   1,
-			Refresh:   refresh,
-			Timeout:   time.Second,
 		},
 	})
 	c.Set("flaky.com.", dns.TypeA, makeAnswer("flaky.com", 0))
@@ -299,17 +299,17 @@ func TestPrefetchSkippedWhileInFlight(t *testing.T) {
 	}
 
 	c := New(Options{
-		MaxEntries:  10,
-		MinTTL:      10 * time.Millisecond,
-		MaxTTL:      time.Hour,
-		NegativeTTL: time.Second,
-		Metrics:     reg,
+		MaxEntries:     10,
+		MinTTL:         10 * time.Millisecond,
+		MaxTTL:         time.Hour,
+		NegativeTTL:    time.Second,
+		Metrics:        reg,
+		Refresh:        refresh,
+		RefreshTimeout: 5 * time.Second,
 		Prefetch: PrefetchOptions{
 			Enabled:   true,
 			Threshold: 50 * time.Millisecond,
 			MinHits:   1,
-			Refresh:   refresh,
-			Timeout:   5 * time.Second,
 		},
 	})
 	c.Set("slow.com.", dns.TypeA, makeAnswer("slow.com", 0))
@@ -346,7 +346,8 @@ func TestPrefetchDisabledByDefault(t *testing.T) {
 		MinTTL:      time.Millisecond,
 		MaxTTL:      time.Hour,
 		NegativeTTL: time.Second,
-		Prefetch:    PrefetchOptions{Refresh: refresh, Threshold: time.Hour, MinHits: 1},
+		Refresh:     refresh,
+		Prefetch:    PrefetchOptions{Threshold: time.Hour, MinHits: 1},
 	})
 	c.Set("quiet.com.", dns.TypeA, makeAnswer("quiet.com", 1))
 
@@ -372,11 +373,11 @@ func TestPrefetchDoesNotFireForUnpopularEntry(t *testing.T) {
 		MinTTL:      time.Millisecond,
 		MaxTTL:      time.Hour,
 		NegativeTTL: time.Second,
+		Refresh:     refresh,
 		Prefetch: PrefetchOptions{
 			Enabled:   true,
 			Threshold: time.Hour, // always "soon to expire" for this test
 			MinHits:   1000,      // effectively unreachable
-			Refresh:   refresh,
 		},
 	})
 	c.Set("unpopular.com.", dns.TypeA, makeAnswer("unpopular.com", 1))
@@ -388,5 +389,192 @@ func TestPrefetchDoesNotFireForUnpopularEntry(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if atomic.LoadInt32(&refreshCalls) != 0 {
 		t.Fatalf("expected no prefetch calls for an entry below MinHits, got %d", refreshCalls)
+	}
+}
+
+func TestStaleWhileRevalidateDisabledByDefault(t *testing.T) {
+	reg := metrics.New()
+	// StaleMaxAge left at zero (the default) even though a Refresh func is
+	// provided -- an expired entry must be a genuine miss until this is
+	// explicitly turned on.
+	c := New(Options{
+		MaxEntries:  10,
+		MinTTL:      10 * time.Millisecond,
+		MaxTTL:      time.Hour,
+		NegativeTTL: time.Second,
+		Metrics:     reg,
+		Refresh: func(ctx context.Context, name string, qtype uint16) (*dns.Msg, error) {
+			return makeAnswer(name, 300), nil
+		},
+	})
+	c.Set("normal.com.", dns.TypeA, makeAnswer("normal.com", 0))
+	c.opts.MinTTL = 10 * time.Millisecond
+
+	time.Sleep(30 * time.Millisecond)
+
+	req := new(dns.Msg)
+	req.SetQuestion("normal.com.", dns.TypeA)
+	if _, ok := c.Get(req, "normal.com.", dns.TypeA); ok {
+		t.Fatalf("expected a genuine miss when stale_while_revalidate is disabled (the default)")
+	}
+	out := metricsSnapshot(reg)
+	if !strings.Contains(out, `powerdns_cache_misses_total{reason="expired"} 1`) {
+		t.Fatalf("expected an expired miss, got:\n%s", out)
+	}
+	if !strings.Contains(out, "powerdns_cache_stale_hits_total 0") {
+		t.Fatalf("expected zero stale hits when the feature is disabled, got:\n%s", out)
+	}
+}
+
+func TestStaleWhileRevalidateServesStaleAndRefreshes(t *testing.T) {
+	reg := metrics.New()
+	var refreshCalls int32
+	refresh := func(ctx context.Context, name string, qtype uint16) (*dns.Msg, error) {
+		atomic.AddInt32(&refreshCalls, 1)
+		return makeAnswer(name, 300), nil // a fresh, long-TTL answer
+	}
+
+	c := New(Options{
+		MaxEntries:     10,
+		MinTTL:         10 * time.Millisecond,
+		MaxTTL:         time.Hour,
+		NegativeTTL:    time.Second,
+		Metrics:        reg,
+		Refresh:        refresh,
+		RefreshTimeout: time.Second,
+		StaleMaxAge:    200 * time.Millisecond,
+	})
+	c.Set("stale.com.", dns.TypeA, makeAnswer("stale.com", 0))
+	c.opts.MinTTL = 30 * time.Millisecond // let the entry actually expire quickly
+
+	time.Sleep(50 * time.Millisecond) // now expired, but well within the 200ms stale window
+
+	req := new(dns.Msg)
+	req.SetQuestion("stale.com.", dns.TypeA)
+	resp, ok := c.Get(req, "stale.com.", dns.TypeA)
+	if !ok {
+		t.Fatalf("expected a stale hit, got a miss")
+	}
+	if len(resp.Answer) != 1 {
+		t.Fatalf("expected the stale answer to still be returned, got %d answers", len(resp.Answer))
+	}
+	if resp.Id != req.Id {
+		t.Fatalf("expected stale response Id %d to match request Id %d", resp.Id, req.Id)
+	}
+
+	// Background revalidation should fire and eventually succeed.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if atomic.LoadInt32(&refreshCalls) >= 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if atomic.LoadInt32(&refreshCalls) < 1 {
+		t.Fatalf("expected stale hit to trigger a background revalidation")
+	}
+
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		out := metricsSnapshot(reg)
+		if strings.Contains(out, "powerdns_cache_stale_hits_total 1") &&
+			strings.Contains(out, "powerdns_cache_stale_revalidations_total 1") {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("expected 1 stale hit and 1 successful revalidation in metrics, got:\n%s", metricsSnapshot(reg))
+}
+
+func TestStaleWhileRevalidateBeyondWindowIsAGenuineMiss(t *testing.T) {
+	reg := metrics.New()
+	c := New(Options{
+		MaxEntries:  10,
+		MinTTL:      10 * time.Millisecond,
+		MaxTTL:      time.Hour,
+		NegativeTTL: time.Second,
+		Metrics:     reg,
+		Refresh: func(ctx context.Context, name string, qtype uint16) (*dns.Msg, error) {
+			return makeAnswer(name, 300), nil
+		},
+		StaleMaxAge: 20 * time.Millisecond, // a short stale window
+	})
+	c.Set("toostale.com.", dns.TypeA, makeAnswer("toostale.com", 0))
+	c.opts.MinTTL = 10 * time.Millisecond
+
+	// Wait past both the TTL and the stale window entirely.
+	time.Sleep(60 * time.Millisecond)
+
+	req := new(dns.Msg)
+	req.SetQuestion("toostale.com.", dns.TypeA)
+	if _, ok := c.Get(req, "toostale.com.", dns.TypeA); ok {
+		t.Fatalf("expected a genuine miss once the entry is older than the stale window")
+	}
+	out := metricsSnapshot(reg)
+	if !strings.Contains(out, `powerdns_cache_misses_total{reason="expired"} 1`) {
+		t.Fatalf("expected an expired miss, got:\n%s", out)
+	}
+	if !strings.Contains(out, "powerdns_cache_stale_hits_total 0") {
+		t.Fatalf("expected zero stale hits once past the stale window, got:\n%s", out)
+	}
+	if !strings.Contains(out, "powerdns_cache_expired_entry_age_seconds_count 1") {
+		t.Fatalf("expected the expired-entry-age histogram to record 1 observation even for a genuine miss, got:\n%s", out)
+	}
+}
+
+func TestExpiredEntryAgeRecordedOnStaleHitToo(t *testing.T) {
+	// The age histogram should fire on every past-expiry lookup, not just
+	// genuine misses -- otherwise it can't give an unbiased view of the
+	// full distribution (see the doc comment on ObserveExpiredEntryAge).
+	reg := metrics.New()
+	c := New(Options{
+		MaxEntries:  10,
+		MinTTL:      10 * time.Millisecond,
+		MaxTTL:      time.Hour,
+		NegativeTTL: time.Second,
+		Metrics:     reg,
+		Refresh: func(ctx context.Context, name string, qtype uint16) (*dns.Msg, error) {
+			return makeAnswer(name, 300), nil
+		},
+		StaleMaxAge: time.Hour, // generous window -- this lookup should be a stale hit
+	})
+	c.Set("agecheck.com.", dns.TypeA, makeAnswer("agecheck.com", 0))
+	c.opts.MinTTL = 10 * time.Millisecond
+
+	time.Sleep(30 * time.Millisecond)
+
+	req := new(dns.Msg)
+	req.SetQuestion("agecheck.com.", dns.TypeA)
+	if _, ok := c.Get(req, "agecheck.com.", dns.TypeA); !ok {
+		t.Fatalf("expected a stale hit")
+	}
+	out := metricsSnapshot(reg)
+	if !strings.Contains(out, "powerdns_cache_expired_entry_age_seconds_count 1") {
+		t.Fatalf("expected the expired-entry-age histogram to record 1 observation on a stale hit too, got:\n%s", out)
+	}
+}
+
+func TestStaleWhileRevalidateRequiresRefreshFunc(t *testing.T) {
+	reg := metrics.New()
+	// StaleMaxAge is set, but no Refresh func is wired -- there would be no
+	// way to ever bring the entry up to date, so this must behave as if
+	// disabled rather than serving indefinitely-stale data forever.
+	c := New(Options{
+		MaxEntries:  10,
+		MinTTL:      10 * time.Millisecond,
+		MaxTTL:      time.Hour,
+		NegativeTTL: time.Second,
+		Metrics:     reg,
+		StaleMaxAge: time.Hour,
+	})
+	c.Set("norefresh.com.", dns.TypeA, makeAnswer("norefresh.com", 0))
+	c.opts.MinTTL = 10 * time.Millisecond
+
+	time.Sleep(30 * time.Millisecond)
+
+	req := new(dns.Msg)
+	req.SetQuestion("norefresh.com.", dns.TypeA)
+	if _, ok := c.Get(req, "norefresh.com.", dns.TypeA); ok {
+		t.Fatalf("expected a miss when StaleMaxAge is set but no Refresh func is configured")
 	}
 }

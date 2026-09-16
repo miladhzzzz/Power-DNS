@@ -61,6 +61,19 @@ max_ttl_seconds = 3600
 negative_ttl_seconds = 30
 persist_path = "" # e.g. "cache.gob" to survive restarts
 
+# Stale-while-revalidate: 0 (the default) disables this. When set above 0,
+# a lookup for an entry whose TTL has *already* expired -- but not more
+# than this many seconds ago -- is still served immediately, with zero
+# extra latency, while a background refresh brings it up to date in the
+# meantime. An entry older than this window is a genuine miss, resolved
+# synchronously, same as when this is 0. This is distinct from
+# [cache.prefetch] below: prefetch tries to refresh a popular entry
+# *before* it expires; this instead changes what happens the moment(s)
+# after it already has, for any entry, not just popular ones. Requires a
+# working relay/doh/dot/plain upstream to actually revalidate against --
+# with none configured, this has no effect.
+stale_while_revalidate_seconds = 0
+
 # Background prefetching: refresh a cache entry before it expires, so a
 # popular record's TTL never actually reaches zero from a caller's point of
 # view. Off by default -- it trades a little extra upstream load for lower
@@ -74,6 +87,8 @@ threshold_seconds = 30
 # this is what stops a one-off lookup from generating background traffic
 # for a record nobody else cares about.
 min_hits = 5
+# Shared with stale-while-revalidate above: bounds every background
+# refresh attempt, regardless of which feature triggered it.
 timeout_seconds = 5
 
 # Local authoritative overrides -- the "custom DNS record management"

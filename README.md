@@ -129,7 +129,18 @@ Kubernetes client in Power-DNS itself.
 - `powerdns_queries_total{strategy=...}` -- resolved (or failed) queries by
   which strategy answered.
 - `powerdns_cache_hits_total` / `powerdns_cache_hit_rate` -- cumulative
-  cache effectiveness.
+  *fresh*-hit effectiveness (excludes stale-while-revalidate hits; see
+  below).
+- `powerdns_cache_stale_hits_total` -- lookups served from an
+  expired-but-still-usable entry (stale-while-revalidate). Always zero
+  unless `cache.stale_while_revalidate_seconds` is set.
+- `powerdns_cache_stale_revalidations_total` /
+  `powerdns_cache_stale_revalidation_failures_total` -- outcomes of the
+  background refreshes stale hits trigger.
+- `powerdns_cache_effective_hit_rate` -- `(hits + stale hits) / total`: the
+  more meaningful number for "what fraction of queries did the caller
+  experience as instant," since a stale hit costs the caller nothing extra
+  either.
 - `powerdns_cache_misses_total{reason="not_found"|"expired"|"disabled"}` --
   *why* a lookup missed, not just that it did.
 - `powerdns_cache_evictions_total{reason="lru"}` -- entries removed to make
@@ -162,14 +173,24 @@ Kubernetes client in Power-DNS itself.
   prefetch candidates that were eligible but not attempted (already
   running, or tried too recently) -- this is what makes the "don't hammer a
   dead upstream" protection observable instead of just assumed.
+- `powerdns_cache_prefetch_protected_hits_total` -- fresh cache hits served
+  from an entry whose last fill was a successful background prefetch (the
+  prefetch analogue of `powerdns_cache_stale_hits_total`). Use
+  `protected / hits` for prefetch's share of fresh hits, and
+  `protected / prefetch_success` for hits gained per successful refresh.
+- `powerdns_cache_expired_entry_age_seconds` -- histogram of how far past
+  TTL an entry was on every past-expiry lookup (before the SWR vs miss
+  decision). Use it to size `cache.stale_while_revalidate_seconds` without
+  guessing (e.g. coverage at 180s ≈
+  `bucket{le="180"} / count`).
 - `powerdns_uptime_seconds`.
 
 See [CHANGES.md](./CHANGES.md) for why this replaces the originally-planned
 eBPF metrics.
 
-### Cache prefetching and request coalescing
+### Cache prefetching, stale-while-revalidate, and request coalescing
 
-Two related optimizations, both on by default except prefetching itself:
+Three related optimizations, all off by default except request coalescing:
 
 - **Prefetching** (`[cache.prefetch]`, off by default): once a cached
   entry's remaining TTL drops below `threshold_seconds`, *and* it's been
@@ -179,6 +200,21 @@ Two related optimizations, both on by default except prefetching itself:
   expires. A popular record's TTL never reaches zero from a caller's point
   of view. `min_hits` keeps a one-off lookup from generating background
   upstream traffic for a record nobody else wants.
+- **Stale-while-revalidate** (`cache.stale_while_revalidate_seconds`, `0`/off
+  by default): the complement to prefetching, for whatever expires anyway.
+  A lookup for an entry whose TTL has *already* passed, but not more than
+  this many seconds ago, is still served immediately -- zero extra latency
+  -- while a background refresh brings it up to date. An entry older than
+  that is a genuine miss, resolved synchronously, same as always. Unlike
+  prefetching, this isn't gated by popularity: any entry within the window
+  gets served stale rather than costing its caller an upstream round trip.
+  `powerdns_cache_stale_hits_total`, `powerdns_cache_stale_revalidations_total`,
+  and `powerdns_cache_stale_revalidation_failures_total` track this
+  separately from ordinary hits/misses, and
+  `powerdns_cache_effective_hit_rate` reports `(hits + stale hits) / total`
+  -- the more meaningful number for "what fraction of queries did the
+  caller experience as instant," since a stale hit is indistinguishable
+  from a fresh one from the caller's side.
 - **Request coalescing** (always on, no config): concurrent queries for the
   same (name, type[, strategy]) that all miss the cache at once -- 50
   clients asking for a record in the same instant right after it expires,
@@ -199,6 +235,30 @@ failures are logged, so normal operation doesn't produce a line per query.
 An unconfigured relay (`relay.url` and `relay.dot_addr` both empty) is a
 valid, deliberately disabled state, not an error -- the client just skips
 straight to its doh/dot/plain fallbacks.
+
+### Config hot-reload
+
+Power-DNS watches its `-config` file and **reloads automatically** when the
+file changes on disk (polled about once per second). You can also send
+`SIGHUP` for a manual reload. No process restart is required for the usual
+tuning knobs.
+
+**Applies live (no restart):**
+
+| Area | Fields |
+|------|--------|
+| Log | `log.level` |
+| Cache | `min_ttl_seconds`, `max_ttl_seconds`, `negative_ttl_seconds`, `stale_while_revalidate_seconds`, `prefetch.*` |
+| Upstream | `doh_servers`, `dot_servers`, `plain_servers`, `timeout_seconds` |
+| Relay client | `url`, `dot_addr`, `auth_token`, `timeout_seconds` |
+| Resolution | `order` |
+| Security | `relay_auth_token`, `admin_auth_token`, `allowed_domains`, `relay_rate_limit_per_minute` |
+
+**Still requires restart:** `mode`, DNS/API/DoT listen addresses, `cache.enabled` /
+`max_entries` / `persist_path`, `records.*`, `log.format`.
+
+On reload the process logs either `config reloaded applied=[...]` or
+warns which changed fields need a restart. In-memory cache entries are kept.
 
 ## Configuration reference
 

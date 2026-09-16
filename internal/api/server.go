@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/miladhzzzz/power-dns/internal/metrics"
@@ -35,6 +36,7 @@ type Config struct {
 
 // Server is the HTTP API server.
 type Server struct {
+	cfgMu   sync.RWMutex
 	cfg     Config
 	logger  *slog.Logger
 	metrics *metrics.Registry
@@ -150,17 +152,29 @@ func (s *Server) handleDeleteRecord(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
-	if s.cfg.AdminAuthToken == "" {
-		return next
-	}
-	token := s.cfg.AdminAuthToken
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Read token on each request so admin_auth_token can hot-reload.
+		s.cfgMu.RLock()
+		token := s.cfg.AdminAuthToken
+		s.cfgMu.RUnlock()
+		if token == "" {
+			next(w, r)
+			return
+		}
 		if r.Header.Get("Authorization") != "Bearer "+token {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		next(w, r)
 	}
+}
+
+// ApplyAdminAuth updates the records-API bearer token without restarting the
+// HTTP server (hot-reload).
+func (s *Server) ApplyAdminAuth(token string) {
+	s.cfgMu.Lock()
+	s.cfg.AdminAuthToken = token
+	s.cfgMu.Unlock()
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {

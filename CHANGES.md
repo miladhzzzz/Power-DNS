@@ -9,6 +9,77 @@ built, silently broken, or not implemented at all (`internal/k8s` and
 give people on DoH-restricted networks a working relay -- and either
 properly implements or deliberately drops each promise, explained below.
 
+## Config hot-reload (edit the file, no restart)
+
+Tuning SWR, prefetch, upstreams, or log level used to require killing the
+process and losing in-memory cache state (unless persistence was enabled).
+That made the new age histogram and SWR window experiments painful.
+
+- `cmd/power-dns` watches `config.toml` (mtime + size, every second) and
+  reloads automatically when the file changes. SIGHUP still triggers a
+  reload as a manual fallback.
+- `config.PlanReload` classifies each diff as **hot-applicable** or
+  **restart-required**. Safe fields are applied live; listen addresses,
+  `mode`, enabling/disabling the cache, and similar structural settings are
+  logged as warnings and left alone until the next process start.
+- Hot-applicable today:
+  - `log.level` (via `slog.LevelVar`)
+  - `cache.min_ttl_seconds` / `max_ttl_seconds` / `negative_ttl_seconds`
+  - `cache.stale_while_revalidate_seconds`
+  - `cache.prefetch.*`
+  - `upstream.*` (servers + timeout)
+  - `relay.url` / `dot_addr` / `auth_token` / timeout
+  - `resolution.order`
+  - `security.*` (tokens, allow-list, rate limit)
+- Cache entries are **not** dropped on reload; only runtime options change
+  (`cache.UpdateRuntime`). Resolver upstream clients and relay security
+  settings swap under locks so in-flight queries finish on the old config.
+
+## Prefetch effectiveness: `powerdns_cache_prefetch_protected_hits_total`
+
+SWR has always been easy to measure (`stale_hits_total`). Prefetch was not:
+a successful background refresh only helps a *later* client lookup, which
+looked like an ordinary fresh hit.
+
+- Cache entries remember whether their current payload was last filled by a
+  successful prefetch (`entry.fromPrefetch`).
+- Each **fresh** hit on such an entry increments
+  `powerdns_cache_prefetch_protected_hits_total` (in addition to
+  `powerdns_cache_hits_total`).
+- Client-driven `Set` and stale-while-revalidate refreshes clear the flag,
+  so only prefetch-sourced fills attribute hits.
+- PromQL parallels SWR:
+
+  ```promql
+  # Share of fresh hits that rode on a prior prefetch
+  100 * powerdns_cache_prefetch_protected_hits_total
+    / clamp_min(powerdns_cache_hits_total, 1)
+
+  # Hits gained per successful prefetch
+  powerdns_cache_prefetch_protected_hits_total
+    / clamp_min(sum(powerdns_cache_prefetch_total{result="success"}), 1)
+  ```
+
+## Data-driven stale-window tuning, and DoH connection reuse
+
+- New `powerdns_cache_expired_entry_age_seconds` histogram: every time a
+  cache lookup finds an entry already past its TTL -- whether
+  stale-while-revalidate ends up serving it or it's a genuine miss --
+  `internal/cache.Cache.Get` records how many seconds past expiry it was.
+  It's recorded before the stale/miss decision is made, so the
+  distribution is unbiased by whatever `stale_while_revalidate_seconds` is
+  currently set to: it directly answers "what fraction of repeat queries
+  for an expired entry would a given window actually catch," turning
+  window tuning into reading a histogram instead of guessing.
+- `internal/upstream.NewDoHClient` now configures its `http.Transport`
+  explicitly (`MaxIdleConnsPerHost: 16`, `ForceAttemptHTTP2: true`) instead
+  of relying on Go's zero-value default, which caps
+  `MaxIdleConnsPerHost` at 2. Under any real concurrency, that default
+  meant connections to the same DoH provider were closed and redialed --
+  a full TLS handshake -- far more often than necessary. Verified with a
+  test asserting 10 sequential queries open at most 2 underlying TCP
+  connections, not 10.
+
 ## DoT (DNS-over-TLS) sits alongside DoH
 
 v1 had no transport but its own bespoke JSON-over-HTTP protocol, and the
@@ -83,6 +154,52 @@ instead. `resolver.Resolve` also skips the `relay` strategy silently (no log
 line at all, since it's an intentionally disabled feature, not a failure)
 whenever `RelayClient` is nil, rather than logging a "strategy failed" line
 on every single query.
+
+## Stale-while-revalidate
+
+Prefetching (added earlier) refreshes a popular entry *before* it expires,
+but says nothing about what happens to an entry that expires anyway --
+which, for anything below the popularity threshold or just unlucky timing,
+was still the normal path: remove the entry, report a miss, force the
+caller through a synchronous upstream round trip. Stale-while-revalidate
+closes that gap, and unlike prefetching, isn't gated by popularity at all:
+
+- New `cache.stale_while_revalidate_seconds` config field (`0`, disabled,
+  by default). When set above 0, `internal/cache.Cache.Get`'s handling of
+  an expired entry gets a middle case: if the entry expired no more than
+  this many seconds ago, it's still returned immediately -- the caller
+  pays zero extra latency -- and a background refresh is triggered via the
+  same `RefreshFunc`/in-flight/cooldown machinery prefetching already used.
+  An entry older than the window is still a genuine miss, exactly as
+  before.
+- That machinery was generalized to serve both features: `RefreshFunc` and
+  its timeout moved from `PrefetchOptions` up to the top-level
+  `cache.Options` (a small breaking change to the package's Go API, not to
+  any TOML field), and the in-flight/cooldown maps were renamed from
+  `prefetchInFlight`/`prefetchLastTry` to `refreshInFlight`/`refreshLastTry`
+  to reflect that they now guard both prefetch and stale-revalidation
+  refreshes for the same key -- a hot record already being prefetched
+  won't also trigger a redundant stale-revalidation the instant it
+  crosses into "expired."
+- New metrics: `powerdns_cache_stale_hits_total`,
+  `powerdns_cache_stale_revalidations_total`, and
+  `powerdns_cache_stale_revalidation_failures_total` -- kept separate from
+  the ordinary hit/miss/prefetch counters, since they answer a genuinely
+  different question (a stale hit is not a miss, and revalidation is not
+  prefetch, even though the underlying refresh call is identical code).
+  `powerdns_cache_hit_rate` deliberately still excludes stale hits --
+  the new `powerdns_cache_effective_hit_rate` reports
+  `(hits + stale hits) / (hits + stale hits + misses)` instead: the more
+  meaningful number for "what fraction of queries did the caller
+  experience as instant," since a stale hit is indistinguishable from a
+  fresh one on the caller's side.
+- Verified live against a real (if synthetic) upstream with a 2-second TTL:
+  a query at t=0 costs a real upstream call; at t=1s (within TTL) is a
+  fresh hit; at t=2.5s (past TTL, within a configured 10s stale window) is
+  a stale hit -- still sub-millisecond -- that triggers exactly one
+  background revalidation; at t=3.5s is fresh again. The upstream saw
+  exactly 2 real calls across 4 queries, and the caller never once waited
+  on one after the first.
 
 ## Request coalescing extended to the relay itself
 

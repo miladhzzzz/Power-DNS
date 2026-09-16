@@ -14,6 +14,10 @@ records_path_prefix = "/api/v1/records"
 [cache]
 enabled = true
 persist_path = "/app/data/cache.gob"
+# Uncomment to serve an entry that's just expired (within this many
+# seconds) immediately while refreshing it in the background, instead of
+# making every caller wait on a synchronous upstream lookup:
+# stale_while_revalidate_seconds = 30
 
 # Uncomment to refresh popular records in the background before they
 # expire, instead of every client eating one cold-cache lookup per TTL

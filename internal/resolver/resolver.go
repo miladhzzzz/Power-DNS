@@ -56,6 +56,10 @@ func isUpstream(strategy string) bool {
 
 // Resolver answers DNS queries by trying each configured strategy in order.
 type Resolver struct {
+	// mu protects hot-reloadable fields (Order, upstream clients, Timeout,
+	// RelayClient). Resolve takes RLock; ApplyRuntime takes Lock.
+	mu sync.RWMutex
+
 	Order []string
 
 	Records     *records.Store // may be nil if disabled
@@ -83,12 +87,49 @@ type Resolver struct {
 	inflight   map[string]*inflightCall
 }
 
+// RuntimeConfig is the subset of resolver settings that can be swapped on
+// SIGHUP without restarting listeners.
+type RuntimeConfig struct {
+	Order       []string
+	RelayClient *relay.Client
+	DoH         *upstream.DoHClient
+	DoT         *upstream.DoTClient
+	Plain       *upstream.PlainClient
+	Timeout     time.Duration
+}
+
+// ApplyRuntime atomically replaces hot-reloadable resolver settings.
+// In-flight queries keep the clients they already observed under RLock.
+func (r *Resolver) ApplyRuntime(rc RuntimeConfig) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if rc.Order != nil {
+		r.Order = append([]string(nil), rc.Order...)
+	}
+	r.RelayClient = rc.RelayClient
+	r.DoH = rc.DoH
+	r.DoT = rc.DoT
+	r.Plain = rc.Plain
+	if rc.Timeout > 0 {
+		r.Timeout = rc.Timeout
+	}
+}
+
 // inflightCall represents one real, currently-running (or just-finished)
 // upstream attempt that other callers for the same key are waiting on.
 type inflightCall struct {
 	wg   sync.WaitGroup
 	resp *dns.Msg
 	err  error
+}
+
+// snapshot copies hot-reloadable fields under RLock so a long-running
+// resolve does not hold the lock across upstream I/O.
+func (r *Resolver) snapshot() (order []string, relay *relay.Client, doh *upstream.DoHClient, dot *upstream.DoTClient, plain *upstream.PlainClient, timeout time.Duration) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	order = append([]string(nil), r.Order...)
+	return order, r.RelayClient, r.DoH, r.DoT, r.Plain, r.Timeout
 }
 
 // Resolve answers req, trying strategies in r.Order and returning the first
@@ -110,8 +151,9 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, origin string) *dn
 	}
 	q := req.Question[0]
 	start := time.Now()
+	order, relayClient, _, _, _, _ := r.snapshot()
 
-	for _, strategy := range r.Order {
+	for _, strategy := range order {
 		var (
 			resp *dns.Msg
 			err  error
@@ -121,7 +163,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, origin string) *dn
 			resp, err = r.fromRecords(req, q)
 		case strategy == StrategyCache:
 			resp, err = r.fromCache(req, q, origin)
-		case strategy == StrategyRelay && r.RelayClient == nil:
+		case strategy == StrategyRelay && relayClient == nil:
 			// Relay is disabled (no relay.url or relay.dot_addr
 			// configured) -- this is a normal, expected configuration,
 			// not a failure, so skip it without logging anything.
@@ -174,9 +216,10 @@ func (r *Resolver) ResolveUpstreamOnly(ctx context.Context, name string, qtype u
 	req.SetQuestion(dns.Fqdn(name), qtype)
 	q := req.Question[0]
 
+	order, relayClient, _, _, _, _ := r.snapshot()
 	var lastErr error
-	for _, strategy := range r.Order {
-		if !isUpstream(strategy) || (strategy == StrategyRelay && r.RelayClient == nil) {
+	for _, strategy := range order {
+		if !isUpstream(strategy) || (strategy == StrategyRelay && relayClient == nil) {
 			continue
 		}
 		resp, err, _ := r.attemptUpstream(ctx, req, q, strategy)
@@ -268,7 +311,11 @@ func restampReply(shared *dns.Msg, req *dns.Msg) *dns.Msg {
 // callUpstream is the actual per-strategy network call, run at most once
 // per singleflight key regardless of how many callers are waiting on it.
 func (r *Resolver) callUpstream(ctx context.Context, req *dns.Msg, strategy string) (*dns.Msg, error) {
-	ctx, cancel := context.WithTimeout(ctx, r.Timeout)
+	_, relayClient, doh, dot, plain, timeout := r.snapshot()
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	start := time.Now()
@@ -278,25 +325,25 @@ func (r *Resolver) callUpstream(ctx context.Context, req *dns.Msg, strategy stri
 	)
 	switch strategy {
 	case StrategyRelay:
-		if r.RelayClient == nil {
+		if relayClient == nil {
 			return nil, fmt.Errorf("no relay configured")
 		}
-		resp, err = r.RelayClient.Resolve(ctx, req)
+		resp, err = relayClient.Resolve(ctx, req)
 	case StrategyDoH:
-		if r.DoH == nil {
+		if doh == nil {
 			return nil, fmt.Errorf("no doh upstream configured")
 		}
-		resp, err = r.DoH.Resolve(ctx, req)
+		resp, err = doh.Resolve(ctx, req)
 	case StrategyDoT:
-		if r.DoT == nil {
+		if dot == nil {
 			return nil, fmt.Errorf("no dot upstream configured")
 		}
-		resp, err = r.DoT.Resolve(ctx, req)
+		resp, err = dot.Resolve(ctx, req)
 	case StrategyPlain:
-		if r.Plain == nil {
+		if plain == nil {
 			return nil, fmt.Errorf("no plain upstream configured")
 		}
-		resp, err = r.Plain.Resolve(ctx, req)
+		resp, err = plain.Resolve(ctx, req)
 	default:
 		return nil, fmt.Errorf("unknown upstream strategy %q", strategy)
 	}

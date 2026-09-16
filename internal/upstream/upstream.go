@@ -32,10 +32,26 @@ type DoHClient struct {
 }
 
 // NewDoHClient builds a DoHClient with the given timeout applied per attempt.
+//
+// The Transport is configured explicitly rather than left as Go's
+// zero-value default: http.DefaultTransport caps MaxIdleConnsPerHost at 2,
+// which under any real concurrency (multiple domains in flight, or bursts
+// coalescing doesn't fully absorb) means connections to the same DoH
+// provider get closed and redialed -- a full TLS handshake -- far more
+// often than necessary. Raising that limit and enabling HTTP/2 lets
+// repeated queries to the same provider actually reuse a warm connection,
+// which is the difference between paying TLS-handshake latency on every
+// single query versus paying it once per idle-timeout window.
 func NewDoHClient(servers []string, timeout time.Duration) *DoHClient {
+	transport := &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 16,
+		IdleConnTimeout:     90 * time.Second,
+		ForceAttemptHTTP2:   true,
+	}
 	return &DoHClient{
 		Servers: servers,
-		Client:  &http.Client{Timeout: timeout},
+		Client:  &http.Client{Timeout: timeout, Transport: transport},
 	}
 }
 

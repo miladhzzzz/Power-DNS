@@ -185,6 +185,72 @@ func TestRelayCoalesceRateZeroWithoutTraffic(t *testing.T) {
 	assertLine(t, b.String(), "powerdns_relay_coalesce_rate 0")
 }
 
+func TestExpiredEntryAgeHistogram(t *testing.T) {
+	r := New()
+	r.ObserveExpiredEntryAge(2 * time.Second)
+	r.ObserveExpiredEntryAge(90 * time.Second)
+	r.ObserveExpiredEntryAge(20 * time.Minute)
+
+	var b strings.Builder
+	r.WriteProm(&b)
+	out := b.String()
+
+	if !strings.Contains(out, `powerdns_cache_expired_entry_age_seconds_count 3`) {
+		t.Fatalf("expected 3 observations, got:\n%s", out)
+	}
+	// 2s falls in the le=5 bucket; cumulative count at le=5 should be 1.
+	assertLine(t, out, `powerdns_cache_expired_entry_age_seconds_bucket{le="5"} 1`)
+	// 90s falls in the le=120 bucket; cumulative count through le=120 should be 2.
+	assertLine(t, out, `powerdns_cache_expired_entry_age_seconds_bucket{le="120"} 2`)
+	// 20m (1200s) falls in the le=1800 bucket; cumulative count reaches 3 there.
+	assertLine(t, out, `powerdns_cache_expired_entry_age_seconds_bucket{le="600"} 2`)
+	assertLine(t, out, `powerdns_cache_expired_entry_age_seconds_bucket{le="1800"} 3`)
+}
+
+func TestStaleHitsAndRevalidationsAreCounted(t *testing.T) {
+	r := New()
+	r.IncStaleHit()
+	r.IncStaleHit()
+	r.IncStaleRevalidation()
+	r.IncStaleRevalidationFailure()
+	r.IncStaleRevalidationFailure()
+	r.IncStaleRevalidationFailure()
+
+	var b strings.Builder
+	r.WriteProm(&b)
+	out := b.String()
+
+	assertLine(t, out, "powerdns_cache_stale_hits_total 2")
+	assertLine(t, out, "powerdns_cache_stale_revalidations_total 1")
+	assertLine(t, out, "powerdns_cache_stale_revalidation_failures_total 3")
+}
+
+func TestEffectiveHitRateIncludesStaleHits(t *testing.T) {
+	r := New()
+	r.IncCacheHit()
+	r.IncCacheHit()
+	r.IncCacheHit()
+	r.IncStaleHit()
+	r.IncCacheMiss(MissNotFound)
+
+	var b strings.Builder
+	r.WriteProm(&b)
+	out := b.String()
+
+	// Plain hit rate: 3 hits / (3 hits + 1 miss) = 0.75 -- stale hits are
+	// deliberately excluded from this one.
+	assertLine(t, out, "powerdns_cache_hit_rate 0.75")
+	// Effective hit rate: (3 hits + 1 stale) / (3 + 1 + 1 miss) = 0.8
+	assertLine(t, out, "powerdns_cache_effective_hit_rate 0.8")
+}
+
+func TestEffectiveHitRateZeroWithoutTraffic(t *testing.T) {
+	r := New()
+	var b strings.Builder
+	r.WriteProm(&b)
+	assertLine(t, b.String(), "powerdns_cache_effective_hit_rate 0")
+}
+
 func assertLine(t *testing.T, haystack, line string) {
 	t.Helper()
 	for _, l := range strings.Split(haystack, "\n") {

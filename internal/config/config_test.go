@@ -102,3 +102,27 @@ func TestInvalidModeRejected(t *testing.T) {
 		t.Fatalf("expected an invalid mode to be rejected")
 	}
 }
+
+func TestStaleWhileRevalidateDisabledByDefault(t *testing.T) {
+	cfg := Default()
+	if cfg.Cache.StaleWhileRevalidateSeconds != 0 {
+		t.Fatalf("expected stale_while_revalidate_seconds to default to 0 (disabled), got %d", cfg.Cache.StaleWhileRevalidateSeconds)
+	}
+}
+
+func TestStaleWhileRevalidateOverlaysFromFile(t *testing.T) {
+	path := writeTemp(t, `
+mode = "client"
+[relay]
+url = "https://relay.example.com/dns-query"
+[cache]
+stale_while_revalidate_seconds = 30
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Cache.StaleWhileRevalidateSeconds != 30 {
+		t.Fatalf("expected stale_while_revalidate_seconds to be overlaid to 30, got %d", cfg.Cache.StaleWhileRevalidateSeconds)
+	}
+}

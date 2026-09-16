@@ -105,6 +105,18 @@ type CacheConfig struct {
 	// and reloaded from on startup. Empty disables persistence.
 	PersistPath string `toml:"persist_path"`
 
+	// StaleWhileRevalidateSeconds enables stale-while-revalidate when
+	// greater than zero (the default, disabled): a lookup for an entry
+	// whose TTL has expired, but not more than this many seconds ago, is
+	// still served immediately -- with zero extra latency -- while a
+	// background refresh brings it up to date. An entry older than that is
+	// a genuine miss, resolved synchronously, same as when this is 0.
+	// This is a distinct mechanism from [cache.prefetch]: prefetch tries to
+	// refresh a popular entry *before* it expires; this instead changes
+	// what happens the moment(s) after it already has, for any entry, not
+	// just popular ones.
+	StaleWhileRevalidateSeconds int `toml:"stale_while_revalidate_seconds"`
+
 	Prefetch PrefetchConfig `toml:"prefetch"`
 }
 
@@ -215,12 +227,13 @@ func Default() Config {
 			RecordsPathPrefix: "/api/v1/records",
 		},
 		Cache: CacheConfig{
-			Enabled:            true,
-			MaxEntries:         10000,
-			MinTTLSeconds:      30,
-			MaxTTLSeconds:      3600,
-			NegativeTTLSeconds: 30,
-			PersistPath:        "",
+			Enabled:                     true,
+			MaxEntries:                  10000,
+			MinTTLSeconds:               30,
+			MaxTTLSeconds:               3600,
+			NegativeTTLSeconds:          30,
+			PersistPath:                 "",
+			StaleWhileRevalidateSeconds: 0, // disabled by default
 			Prefetch: PrefetchConfig{
 				Enabled:          false,
 				ThresholdSeconds: 30,
@@ -295,4 +308,114 @@ func (c Config) Validate() error {
 // startup.
 func (c Config) RelayDisabled() bool {
 	return c.Relay.URL == "" && c.Relay.DoTAddr == ""
+}
+
+// ReloadPlan describes what a hot-reload of newCfg on top of old can apply
+// without restarting the process, and which changes require a full restart.
+type ReloadPlan struct {
+	// Applied lists human-readable descriptions of settings that will be
+	// live-updated.
+	Applied []string
+	// RestartRequired lists settings that changed but cannot be applied
+	// without restarting (listen addresses, mode, enabling/disabling
+	// major subsystems, etc.).
+	RestartRequired []string
+}
+
+// PlanReload compares old with newCfg and reports which differences are
+// hot-reloadable versus restart-only. It does not mutate either config.
+func PlanReload(old, newCfg Config) ReloadPlan {
+	var p ReloadPlan
+
+	// --- Restart-only ---
+	if old.Mode != newCfg.Mode {
+		p.RestartRequired = append(p.RestartRequired, "mode")
+	}
+	if old.DNSServer.ListenAddr != newCfg.DNSServer.ListenAddr {
+		p.RestartRequired = append(p.RestartRequired, "dns_server.listen_addr")
+	}
+	if old.DNSServer.DoT != newCfg.DNSServer.DoT {
+		p.RestartRequired = append(p.RestartRequired, "dns_server.dot")
+	}
+	if old.API.ListenAddr != newCfg.API.ListenAddr {
+		p.RestartRequired = append(p.RestartRequired, "api.listen_addr")
+	}
+	if old.API.RelayPath != newCfg.API.RelayPath {
+		p.RestartRequired = append(p.RestartRequired, "api.relay_path")
+	}
+	if old.API.RecordsPathPrefix != newCfg.API.RecordsPathPrefix {
+		p.RestartRequired = append(p.RestartRequired, "api.records_path_prefix")
+	}
+	if old.API.RelayDoT != newCfg.API.RelayDoT {
+		p.RestartRequired = append(p.RestartRequired, "api.relay_dot")
+	}
+	if old.Cache.Enabled != newCfg.Cache.Enabled {
+		p.RestartRequired = append(p.RestartRequired, "cache.enabled")
+	}
+	if old.Cache.MaxEntries != newCfg.Cache.MaxEntries {
+		p.RestartRequired = append(p.RestartRequired, "cache.max_entries")
+	}
+	if old.Cache.PersistPath != newCfg.Cache.PersistPath {
+		p.RestartRequired = append(p.RestartRequired, "cache.persist_path")
+	}
+	if old.Records != newCfg.Records {
+		p.RestartRequired = append(p.RestartRequired, "records")
+	}
+	if old.Log.Format != newCfg.Log.Format {
+		p.RestartRequired = append(p.RestartRequired, "log.format")
+	}
+
+	// --- Hot-reloadable ---
+	if old.Log.Level != newCfg.Log.Level {
+		p.Applied = append(p.Applied, "log.level")
+	}
+
+	if old.Cache.MinTTLSeconds != newCfg.Cache.MinTTLSeconds {
+		p.Applied = append(p.Applied, "cache.min_ttl_seconds")
+	}
+	if old.Cache.MaxTTLSeconds != newCfg.Cache.MaxTTLSeconds {
+		p.Applied = append(p.Applied, "cache.max_ttl_seconds")
+	}
+	if old.Cache.NegativeTTLSeconds != newCfg.Cache.NegativeTTLSeconds {
+		p.Applied = append(p.Applied, "cache.negative_ttl_seconds")
+	}
+	if old.Cache.StaleWhileRevalidateSeconds != newCfg.Cache.StaleWhileRevalidateSeconds {
+		p.Applied = append(p.Applied, "cache.stale_while_revalidate_seconds")
+	}
+	if old.Cache.Prefetch != newCfg.Cache.Prefetch {
+		p.Applied = append(p.Applied, "cache.prefetch")
+	}
+
+	if old.Relay != newCfg.Relay {
+		p.Applied = append(p.Applied, "relay")
+	}
+	if !stringSlicesEqual(old.Upstream.DoHServers, newCfg.Upstream.DoHServers) ||
+		!stringSlicesEqual(old.Upstream.DoTServers, newCfg.Upstream.DoTServers) ||
+		!stringSlicesEqual(old.Upstream.PlainServers, newCfg.Upstream.PlainServers) ||
+		old.Upstream.TimeoutSeconds != newCfg.Upstream.TimeoutSeconds {
+		p.Applied = append(p.Applied, "upstream")
+	}
+	if !stringSlicesEqual(old.Resolution.Order, newCfg.Resolution.Order) {
+		p.Applied = append(p.Applied, "resolution.order")
+	}
+	if old.Security.RelayAuthToken != newCfg.Security.RelayAuthToken ||
+		old.Security.AdminAuthToken != newCfg.Security.AdminAuthToken ||
+		old.Security.RelayRateLimitPerMinute != newCfg.Security.RelayRateLimitPerMinute ||
+		!stringSlicesEqual(old.Security.AllowedDomains, newCfg.Security.AllowedDomains) {
+		p.Applied = append(p.Applied, "security")
+	}
+
+	return p
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

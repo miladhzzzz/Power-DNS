@@ -137,6 +137,11 @@ type Registry struct {
 	// preventing misses rather than only counting refresh attempts.
 	prefetchProtectedHits int64
 
+	// poisonedAnswersTotal counts DNS answers rejected because they
+	// contained a banned address (e.g. Iranian GFI 10.10.34.0/24). Labeled
+	// by path so operators can confirm only plain UDP/53 is affected.
+	poisonedAnswersTotal map[string]*int64
+
 	startedAt time.Time
 	cacheHits int64
 
@@ -146,22 +151,27 @@ type Registry struct {
 	// import internal/cache (which itself imports metrics to record hits
 	// and misses -- a callback avoids the import cycle that would create).
 	cacheSizeFunc func() (entries, capacity int)
+
+	// upstreamHealthFunc, if set, is polled at scrape time to report
+	// per-endpoint health gauges/counters.
+	upstreamHealthFunc func() []UpstreamEndpointHealth
 }
 
 // New creates an empty, ready-to-use Registry.
 func New() *Registry {
 	return &Registry{
-		queriesTotal:       make(map[string]*int64),
-		cacheMissesTotal:   make(map[string]*int64),
-		cacheEvictions:     make(map[string]*int64),
-		upstreamLatencyMs:  make(map[string]*histogram),
-		relayServerLatency: newHistogram(latencyBuckets),
-		expiredEntryAge:    newHistogram(expiredAgeBuckets),
-		upstreamCalls:      make(map[string]*int64),
-		upstreamCoalesced:  make(map[string]*int64),
-		prefetchTotal:      make(map[string]*int64),
-		prefetchSkipped:    make(map[string]*int64),
-		startedAt:          time.Now(),
+		queriesTotal:         make(map[string]*int64),
+		cacheMissesTotal:     make(map[string]*int64),
+		cacheEvictions:       make(map[string]*int64),
+		upstreamLatencyMs:    make(map[string]*histogram),
+		relayServerLatency:   newHistogram(latencyBuckets),
+		expiredEntryAge:      newHistogram(expiredAgeBuckets),
+		upstreamCalls:        make(map[string]*int64),
+		upstreamCoalesced:    make(map[string]*int64),
+		prefetchTotal:        make(map[string]*int64),
+		prefetchSkipped:      make(map[string]*int64),
+		poisonedAnswersTotal: make(map[string]*int64),
+		startedAt:            time.Now(),
 	}
 }
 
@@ -223,6 +233,23 @@ func (r *Registry) SetCacheSizeFunc(f func() (entries, capacity int)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.cacheSizeFunc = f
+}
+
+// UpstreamEndpointHealth is a metrics-local copy of health.Snapshot fields
+// so this package does not import internal/upstream/health.
+type UpstreamEndpointHealth struct {
+	Path, Endpoint string
+	State          string // healthy|degraded|unhealthy|probing
+	EWMALatencyMs  float64
+	Requests, Failures uint64
+}
+
+// SetUpstreamHealthFunc registers a callback polled at scrape time for
+// per-endpoint health series. Pass nil to disable.
+func (r *Registry) SetUpstreamHealthFunc(f func() []UpstreamEndpointHealth) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.upstreamHealthFunc = f
 }
 
 // ObserveUpstreamLatency records how long one attempt at the given upstream
@@ -295,6 +322,13 @@ func (r *Registry) IncPrefetchProtectedHit() {
 	atomic.AddInt64(&r.prefetchProtectedHits, 1)
 }
 
+// IncPoisonedAnswer records one DNS answer rejected because it contained a
+// banned address (Iranian GFI injection, etc.). path should be the
+// resolution path that produced it, e.g. metrics.PathPlain.
+func (r *Registry) IncPoisonedAnswer(path string) {
+	atomic.AddInt64(r.counter(&r.mu, r.poisonedAnswersTotal, path), 1)
+}
+
 // IncRelayCall records one real upstream resolution the relay performed for
 // an incoming query -- exactly the attempts that survived the relay's own
 // request coalescing (see internal/relay.Server).
@@ -335,6 +369,8 @@ func (r *Registry) WriteProm(w *strings.Builder) {
 	r.writeUpstreamCoalescing(w)
 	r.writeRelayCoalescing(w)
 	r.writePrefetchMetrics(w)
+	r.writePoisonedAnswers(w)
+	r.writeUpstreamEndpointHealth(w)
 
 	fmt.Fprintf(w, "# HELP powerdns_relay_server_latency_ms Time the relay itself spent resolving a query against its own upstreams (relay/both mode only).\n")
 	fmt.Fprintf(w, "# TYPE powerdns_relay_server_latency_ms histogram\n")
@@ -563,6 +599,64 @@ func (r *Registry) writePrefetchMetrics(w *strings.Builder) {
 	fmt.Fprintf(w, "# HELP powerdns_cache_prefetch_protected_hits_total Fresh cache hits served from an entry last filled by a successful background prefetch. The prefetch analogue of powerdns_cache_stale_hits_total: attributes client-visible hits to prior prefetch work.\n")
 	fmt.Fprintf(w, "# TYPE powerdns_cache_prefetch_protected_hits_total counter\n")
 	fmt.Fprintf(w, "powerdns_cache_prefetch_protected_hits_total %d\n", protected)
+}
+
+
+func (r *Registry) writeUpstreamEndpointHealth(w *strings.Builder) {
+	r.mu.Lock()
+	f := r.upstreamHealthFunc
+	r.mu.Unlock()
+	if f == nil {
+		return
+	}
+	snaps := f()
+	if len(snaps) == 0 {
+		return
+	}
+
+	fmt.Fprintf(w, "# HELP powerdns_upstream_endpoint_requests_total Requests attempted against one specific upstream endpoint, by path.\n")
+	fmt.Fprintf(w, "# TYPE powerdns_upstream_endpoint_requests_total counter\n")
+	for _, s := range snaps {
+		fmt.Fprintf(w, "powerdns_upstream_endpoint_requests_total{path=%q,endpoint=%q} %d\n", s.Path, s.Endpoint, s.Requests)
+	}
+	fmt.Fprintf(w, "# HELP powerdns_upstream_endpoint_failures_total Failed requests against one specific upstream endpoint, by path.\n")
+	fmt.Fprintf(w, "# TYPE powerdns_upstream_endpoint_failures_total counter\n")
+	for _, s := range snaps {
+		fmt.Fprintf(w, "powerdns_upstream_endpoint_failures_total{path=%q,endpoint=%q} %d\n", s.Path, s.Endpoint, s.Failures)
+	}
+	fmt.Fprintf(w, "# HELP powerdns_upstream_endpoint_latency_ewma_ms EWMA latency (alpha=0.2) for one specific upstream endpoint.\n")
+	fmt.Fprintf(w, "# TYPE powerdns_upstream_endpoint_latency_ewma_ms gauge\n")
+	for _, s := range snaps {
+		fmt.Fprintf(w, "powerdns_upstream_endpoint_latency_ewma_ms{path=%q,endpoint=%q} %g\n", s.Path, s.Endpoint, s.EWMALatencyMs)
+	}
+	states := []string{"healthy", "degraded", "unhealthy", "probing"}
+	fmt.Fprintf(w, "# HELP powerdns_upstream_endpoint_state Current health state of one upstream endpoint (1 for the active state).\n")
+	fmt.Fprintf(w, "# TYPE powerdns_upstream_endpoint_state gauge\n")
+	for _, s := range snaps {
+		for _, st := range states {
+			v := 0
+			if s.State == st {
+				v = 1
+			}
+			fmt.Fprintf(w, "powerdns_upstream_endpoint_state{path=%q,endpoint=%q,state=%q} %d\n", s.Path, s.Endpoint, st, v)
+		}
+	}
+}
+
+func (r *Registry) writePoisonedAnswers(w *strings.Builder) {
+	r.mu.Lock()
+	paths := sortedKeys(r.poisonedAnswersTotal)
+	counts := make(map[string]int64, len(paths))
+	for _, p := range paths {
+		counts[p] = atomic.LoadInt64(r.poisonedAnswersTotal[p])
+	}
+	r.mu.Unlock()
+
+	fmt.Fprintf(w, "# HELP powerdns_poisoned_answers_total DNS answers rejected because they contained a banned address (e.g. Iranian GFI 10.10.34.0/24 injection). Labeled by the path that produced the answer.\n")
+	fmt.Fprintf(w, "# TYPE powerdns_poisoned_answers_total counter\n")
+	for _, p := range paths {
+		fmt.Fprintf(w, "powerdns_poisoned_answers_total{path=%q} %d\n", p, counts[p])
+	}
 }
 
 func unionKeys(maps ...map[string]*int64) map[string]struct{} {

@@ -26,10 +26,12 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/miladhzzzz/power-dns/internal/cache"
+	"github.com/miladhzzzz/power-dns/internal/filter"
 	"github.com/miladhzzzz/power-dns/internal/metrics"
 	"github.com/miladhzzzz/power-dns/internal/records"
 	"github.com/miladhzzzz/power-dns/internal/relay"
 	"github.com/miladhzzzz/power-dns/internal/upstream"
+	"github.com/miladhzzzz/power-dns/internal/upstream/health"
 )
 
 // Strategy names, matching config.ResolutionConfig.Order entries.
@@ -72,6 +74,15 @@ type Resolver struct {
 	Timeout time.Duration // per relay/doh/dot/plain attempt
 	Logger  *slog.Logger
 	Metrics *metrics.Registry
+	// Ban rejects answers that contain banned A/AAAA addresses before they
+	// are cached. Plain DNS already filters at the upstream layer; this is
+	// the last line of defense so a poisoned answer can never pollute the
+	// cache no matter which strategy produced it.
+	Ban *filter.BanList
+	// Health drives adaptive reordering of upstream strategies when Adaptive
+	// is true. Nil disables adaptive behaviour regardless of Adaptive.
+	Health   *health.Tracker
+	Adaptive bool
 
 	// inflight coalesces concurrent calls to the same (qname, qtype,
 	// strategy) into a single in-flight upstream attempt; see
@@ -96,6 +107,7 @@ type RuntimeConfig struct {
 	DoT         *upstream.DoTClient
 	Plain       *upstream.PlainClient
 	Timeout     time.Duration
+	Adaptive    bool
 }
 
 // ApplyRuntime atomically replaces hot-reloadable resolver settings.
@@ -113,6 +125,7 @@ func (r *Resolver) ApplyRuntime(rc RuntimeConfig) {
 	if rc.Timeout > 0 {
 		r.Timeout = rc.Timeout
 	}
+	r.Adaptive = rc.Adaptive
 }
 
 // inflightCall represents one real, currently-running (or just-finished)
@@ -152,6 +165,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, origin string) *dn
 	q := req.Question[0]
 	start := time.Now()
 	order, relayClient, _, _, _, _ := r.snapshot()
+	order = r.adaptOrder(order)
 
 	for _, strategy := range order {
 		var (
@@ -184,6 +198,21 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, origin string) *dn
 		if resp == nil {
 			r.log().Debug("resolution strategy declined", "origin", origin, "strategy", strategy, "qname", q.Name)
 			continue // e.g. a records/cache miss; try the next strategy
+		}
+
+		// Never store poisoned answers. Plain DNS already rejects them in
+		// upstream.PlainClient; this catches any residual path and keeps
+		// the cache clean after a fallback storm (e.g. tunnel drop).
+		if r.Ban != nil {
+			if bad := r.Ban.ContainsAnswer(resp); bad != "" {
+				if r.Metrics != nil {
+					r.Metrics.IncPoisonedAnswer(strategy)
+				}
+				r.log().Warn("rejected poisoned answer before cache",
+					"origin", origin, "strategy", strategy, "qname", q.Name,
+					"banned_ip", bad)
+				continue
+			}
 		}
 
 		r.recordMetric(strategy)
@@ -410,6 +439,40 @@ func (r *Resolver) log() *slog.Logger {
 		return r.Logger
 	}
 	return slog.Default()
+}
+
+
+// adaptOrder reorders upstream strategies (relay/doh/dot/plain) by path
+// health when Adaptive is on. records/cache keep their configured slots.
+func (r *Resolver) adaptOrder(order []string) []string {
+	if !r.Adaptive || r.Health == nil {
+		return order
+	}
+	var local, upstream []string
+	var upstreamIdx []int
+	for i, s := range order {
+		if isUpstream(s) {
+			upstream = append(upstream, s)
+			upstreamIdx = append(upstreamIdx, i)
+		} else {
+			local = append(local, s)
+		}
+	}
+	if len(upstream) <= 1 {
+		return order
+	}
+	// Map strategy names to path labels for OrderTransports.
+	// relay is treated as its own path label "relay".
+	ranked := r.Health.OrderTransports(upstream)
+	// Rebuild: keep non-upstream positions fixed; fill upstream slots in ranked order.
+	out := make([]string, len(order))
+	copy(out, order)
+	for i, idx := range upstreamIdx {
+		if i < len(ranked) {
+			out[idx] = ranked[i]
+		}
+	}
+	return out
 }
 
 func servfail(req *dns.Msg) *dns.Msg {

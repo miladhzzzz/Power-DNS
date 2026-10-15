@@ -39,6 +39,7 @@ type Config struct {
 
 	DNSServer  DNSServerConfig  `toml:"dns_server"`
 	API        APIConfig        `toml:"api"`
+	Metrics    MetricsConfig    `toml:"metrics"`
 	Cache      CacheConfig      `toml:"cache"`
 	Records    RecordsConfig    `toml:"records"`
 	Relay      RelayConfig      `toml:"relay"`
@@ -81,11 +82,22 @@ type APIConfig struct {
 	RelayPath string `toml:"relay_path"`
 	// RecordsPathPrefix is where the custom-records CRUD API is mounted.
 	RecordsPathPrefix string `toml:"records_path_prefix"`
+	// AdminPathPrefix is where management endpoints (cache flush/refresh,
+	// status) are mounted. Empty disables them. Defaults to "/api/v1/admin".
+	AdminPathPrefix string `toml:"admin_path_prefix"`
 	// RelayDoT, if ListenAddr is set, also exposes the relay over RFC 7858
 	// DNS-over-TLS (conventionally port 853) alongside the DoH endpoint
 	// above -- so a network blocking one transport doesn't block the other.
 	// Only used in relay/both mode.
 	RelayDoT DoTListenerConfig `toml:"relay_dot"`
+}
+
+// MetricsConfig controls Prometheus metrics collection and the /metrics
+// endpoint. When Enabled is false, no counters/histograms are recorded and
+// the HTTP handler returns 404 — useful on constrained hosts where the
+// atomic increments and scrape path are pure overhead.
+type MetricsConfig struct {
+	Enabled bool `toml:"enabled"`
 }
 
 // CacheConfig controls the answer cache.
@@ -191,9 +203,16 @@ type ResolutionConfig struct {
 	// "dot", "plain". The first strategy to produce an answer wins; later
 	// ones are only tried if the earlier ones fail or are disabled.
 	Order []string `toml:"order"`
+	// Adaptive, when true, reorders the upstream strategies (relay/doh/dot/plain)
+	// within Order by observed path health so a degraded transport yields to
+	// a healthier one. Local strategies (records, cache) keep their positions.
+	// Encrypted paths are never ranked below plain solely on latency.
+	// Default false — opt-in Milestone 5 behaviour.
+	Adaptive bool `toml:"adaptive"`
 }
 
-// SecurityConfig controls access control for the relay and admin API.
+// SecurityConfig controls access control for the relay and admin API, plus
+// answer-level bans used to reject poisoned DNS responses.
 type SecurityConfig struct {
 	// RelayAuthToken, if set, requires "Authorization: Bearer <token>" on
 	// the relay endpoint. Leave empty to run an open relay.
@@ -207,6 +226,12 @@ type SecurityConfig struct {
 	// RelayRateLimitPerMinute caps requests per source IP on the relay
 	// endpoint. 0 disables rate limiting.
 	RelayRateLimitPerMinute int `toml:"relay_rate_limit_per_minute"`
+	// BannedAnswerCIDRs lists networks that must never appear in a DNS
+	// A/AAAA answer we accept from plain DNS or store in the cache.
+	// Default is the Iranian GFI injection range 10.10.34.0/24. Empty
+	// disables the filter. Future ad-block / bad-domain lists will sit
+	// alongside this field.
+	BannedAnswerCIDRs []string `toml:"banned_answer_cidrs"`
 }
 
 // Default returns a Config populated with sensible defaults. Load starts
@@ -225,6 +250,10 @@ func Default() Config {
 			ListenAddr:        "127.0.0.1:8000",
 			RelayPath:         "/dns-query",
 			RecordsPathPrefix: "/api/v1/records",
+			AdminPathPrefix:   "/api/v1/admin",
+		},
+		Metrics: MetricsConfig{
+			Enabled: true,
 		},
 		Cache: CacheConfig{
 			Enabled:                     true,
@@ -260,6 +289,8 @@ func Default() Config {
 		},
 		Security: SecurityConfig{
 			RelayRateLimitPerMinute: 600,
+			// Iranian GFI DNS-injection black-hole range (10.10.34.34/.35/.36).
+			BannedAnswerCIDRs: []string{"10.10.34.0/24"},
 		},
 	}
 }
@@ -346,8 +377,14 @@ func PlanReload(old, newCfg Config) ReloadPlan {
 	if old.API.RecordsPathPrefix != newCfg.API.RecordsPathPrefix {
 		p.RestartRequired = append(p.RestartRequired, "api.records_path_prefix")
 	}
+	if old.API.AdminPathPrefix != newCfg.API.AdminPathPrefix {
+		p.RestartRequired = append(p.RestartRequired, "api.admin_path_prefix")
+	}
 	if old.API.RelayDoT != newCfg.API.RelayDoT {
 		p.RestartRequired = append(p.RestartRequired, "api.relay_dot")
+	}
+	if old.Metrics.Enabled != newCfg.Metrics.Enabled {
+		p.RestartRequired = append(p.RestartRequired, "metrics.enabled")
 	}
 	if old.Cache.Enabled != newCfg.Cache.Enabled {
 		p.RestartRequired = append(p.RestartRequired, "cache.enabled")
@@ -398,10 +435,14 @@ func PlanReload(old, newCfg Config) ReloadPlan {
 	if !stringSlicesEqual(old.Resolution.Order, newCfg.Resolution.Order) {
 		p.Applied = append(p.Applied, "resolution.order")
 	}
+	if old.Resolution.Adaptive != newCfg.Resolution.Adaptive {
+		p.Applied = append(p.Applied, "resolution.adaptive")
+	}
 	if old.Security.RelayAuthToken != newCfg.Security.RelayAuthToken ||
 		old.Security.AdminAuthToken != newCfg.Security.AdminAuthToken ||
 		old.Security.RelayRateLimitPerMinute != newCfg.Security.RelayRateLimitPerMinute ||
-		!stringSlicesEqual(old.Security.AllowedDomains, newCfg.Security.AllowedDomains) {
+		!stringSlicesEqual(old.Security.AllowedDomains, newCfg.Security.AllowedDomains) ||
+		!stringSlicesEqual(old.Security.BannedAnswerCIDRs, newCfg.Security.BannedAnswerCIDRs) {
 		p.Applied = append(p.Applied, "security")
 	}
 

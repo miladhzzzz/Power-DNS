@@ -2,4 +2,5 @@
 .vscode
 .idea
 *.log
+*.bak
 config.toml

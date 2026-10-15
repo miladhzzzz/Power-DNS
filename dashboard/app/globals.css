@@ -1,0 +1,122 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #0a0b0d;
+  --color-bg-elevated: #12141a;
+  --color-fg: #e8eaee;
+  --color-muted: #9aa0ab;
+  --color-subtle: #6b7180;
+  --color-accent: #c9ced8;
+  --color-accent-fg: #0a0b0d;
+  --color-danger: #e07070;
+  --color-ok: #6ee7b7;
+  --color-warn: #f0c674;
+  --color-line: #2a2c32;
+
+  --radius-xs: 4px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+
+  --font-sans: "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+@layer base {
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  html,
+  body,
+  #app {
+    min-height: 100%;
+    background: #0a0b0d;
+    color: #e8eaee;
+  }
+
+  body {
+    font-family: var(--font-sans);
+  }
+
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
+}
+
+/* Unlayered on purpose: Next minifies @layer utilities into 8-digit hex
+   (#101114b8) which some builds drop, so tiles went fully see-through. */
+.bg-ambient {
+  background:
+    radial-gradient(900px 600px at 88% -12%, #16171c, transparent 55%),
+    radial-gradient(700px 500px at 0% 30%, #121318, transparent 50%),
+    linear-gradient(180deg, #0c0d10 0%, #0a0b0d 100%);
+}
+
+.bg-grid {
+  background-image:
+    linear-gradient(to right, #1c1e24 1px, transparent 1px),
+    linear-gradient(to bottom, #1c1e24 1px, transparent 1px);
+  background-size: 44px 44px;
+}
+
+.glass-sidebar {
+  background: linear-gradient(180deg, #14151a, #0e0f12);
+  border-right: 1px solid #2a2c32;
+}
+
+.glass-topbar {
+  background: linear-gradient(180deg, #16171c, #101114);
+  border-bottom: 1px solid #2a2c32;
+}
+
+.glass-panel {
+  background: linear-gradient(180deg, #1a1b20, #101114);
+  border: 1px solid #2a2c32;
+  box-shadow: 0 24px 48px #00000066;
+}
+
+.glass-chip {
+  background: #1a1b20;
+  border: 1px solid #2a2c32;
+}
+
+.tile {
+  isolation: isolate;
+  border-radius: 0.75rem;
+  border: 1px solid #2a2c32;
+  background: linear-gradient(165deg, #1c1e24 0%, #14161b 100%);
+  box-shadow: inset 0 1px 0 #ffffff0d, 0 8px 24px #0000002e;
+  transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
+}
+
+.tile:hover {
+  border-color: #3a3d44;
+  background: linear-gradient(165deg, #22242b 0%, #17191e 100%);
+  box-shadow: inset 0 1px 0 #ffffff14, 0 12px 32px #00000047;
+}
+
+.tile-sm {
+  isolation: isolate;
+  border-radius: 0.5rem;
+  border: 1px solid #2a2c32;
+  background: linear-gradient(165deg, #1a1c22 0%, #12141a 100%);
+  transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
+}
+
+.tile-sm:hover {
+  border-color: #3a3d44;
+  background: linear-gradient(165deg, #202229 0%, #16181d 100%);
+  box-shadow: 0 8px 20px #00000038;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tile,
+  .tile-sm {
+    transition: none;
+  }
+}

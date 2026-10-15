@@ -29,11 +29,13 @@ import (
 	"github.com/miladhzzzz/power-dns/internal/cache"
 	"github.com/miladhzzzz/power-dns/internal/config"
 	"github.com/miladhzzzz/power-dns/internal/dnsserver"
+	"github.com/miladhzzzz/power-dns/internal/filter"
 	"github.com/miladhzzzz/power-dns/internal/metrics"
 	"github.com/miladhzzzz/power-dns/internal/records"
 	"github.com/miladhzzzz/power-dns/internal/relay"
 	"github.com/miladhzzzz/power-dns/internal/resolver"
 	"github.com/miladhzzzz/power-dns/internal/upstream"
+	"github.com/miladhzzzz/power-dns/internal/upstream/health"
 )
 
 func main() {
@@ -68,12 +70,28 @@ type app struct {
 	reg         *metrics.Registry
 	answerCache *cache.Cache
 	res         *resolver.Resolver
-	relayHandler *relay.Server
-	apiServer   *api.Server
+	relayHandler  *relay.Server
+	apiServer     *api.Server
+	healthTracker *health.Tracker
+	detector      *health.Detector
 }
 
 func run(configPath string, cfg config.Config, logger *slog.Logger, levelVar *slog.LevelVar) error {
-	reg := metrics.New()
+	var reg *metrics.Registry
+	if cfg.Metrics.Enabled {
+		reg = metrics.New()
+	}
+
+	banList, err := filter.NewBanList(cfg.Security.BannedAnswerCIDRs)
+	if err != nil {
+		logger.Warn("some banned_answer_cidrs failed to parse", "error", err)
+	}
+	if banList != nil && !banList.Empty() {
+		logger.Info("answer ban list active", "cidrs", cfg.Security.BannedAnswerCIDRs)
+	}
+
+	healthTracker := health.NewTracker()
+	detector := health.NewDetector(healthTracker)
 
 	var recStore *records.Store
 	if cfg.Records.Enabled {
@@ -107,7 +125,9 @@ func run(configPath string, cfg config.Config, logger *slog.Logger, levelVar *sl
 			},
 			StaleMaxAge: time.Duration(cfg.Cache.StaleWhileRevalidateSeconds) * time.Second,
 		})
-		reg.SetCacheSizeFunc(func() (int, int) { return answerCache.Len(), answerCache.Cap() })
+		if reg != nil {
+			reg.SetCacheSizeFunc(func() (int, int) { return answerCache.Len(), answerCache.Cap() })
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -134,10 +154,12 @@ func run(configPath string, cfg config.Config, logger *slog.Logger, levelVar *sl
 	if cfg.Mode == config.ModeRelay || cfg.Mode == config.ModeBoth {
 		relayHandler = relay.NewServer(
 			&upstream.Chain{
-				DoH:     upstream.NewDoHClient(cfg.Upstream.DoHServers, time.Duration(cfg.Upstream.TimeoutSeconds)*time.Second),
-				DoT:     upstream.NewDoTClient(cfg.Upstream.DoTServers, time.Duration(cfg.Upstream.TimeoutSeconds)*time.Second),
-				Plain:   upstream.NewPlainClient(cfg.Upstream.PlainServers, time.Duration(cfg.Upstream.TimeoutSeconds)*time.Second),
-				Metrics: reg,
+				DoH:      newDoHClient(cfg.Upstream.DoHServers, time.Duration(cfg.Upstream.TimeoutSeconds)*time.Second, healthTracker),
+				DoT:      newDoTClient(cfg.Upstream.DoTServers, time.Duration(cfg.Upstream.TimeoutSeconds)*time.Second, healthTracker),
+				Plain:    newPlainClient(cfg.Upstream.PlainServers, time.Duration(cfg.Upstream.TimeoutSeconds)*time.Second, banList, reg, healthTracker),
+				Metrics:  reg,
+				Health:   healthTracker,
+				Adaptive: cfg.Resolution.Adaptive,
 			},
 			logger.With("component", "relay"),
 			reg,
@@ -158,8 +180,62 @@ func run(configPath string, cfg config.Config, logger *slog.Logger, levelVar *sl
 		Addr:              cfg.API.ListenAddr,
 		RelayPath:         cfg.API.RelayPath,
 		RecordsPathPrefix: cfg.API.RecordsPathPrefix,
+		AdminPathPrefix:   cfg.API.AdminPathPrefix,
 		AdminAuthToken:    cfg.Security.AdminAuthToken,
-	}, logger.With("component", "api"), reg, recStore, relayHandler)
+	}, logger.With("component", "api"), reg, recStore, answerCache, res, relayHandler)
+
+	apiServer.SetUpstreamHealthFunc(func() []api.UpstreamEndpointHealth {
+		snaps := healthTracker.Snapshot()
+		out := make([]api.UpstreamEndpointHealth, len(snaps))
+		for i, s := range snaps {
+			out[i] = api.UpstreamEndpointHealth{
+				Path:                 s.Path,
+				Endpoint:             s.Endpoint,
+				State:                s.State.String(),
+				Score:                s.Score,
+				EWMALatencyMs:        s.EWMALatencyMs,
+				Requests:             s.Requests,
+				Successes:            s.Successes,
+				Failures:             s.Failures,
+				ConsecutiveFailures:  s.ConsecutiveFailures,
+				ConsecutiveSuccesses: s.ConsecutiveSuccesses,
+			}
+		}
+		return out
+	})
+	apiServer.SetIncidentsFunc(func() []api.HealthIncident {
+		incs := detector.Evaluate()
+		out := make([]api.HealthIncident, len(incs))
+		for i, inc := range incs {
+			out[i] = api.HealthIncident{
+				Kind:     string(inc.Kind),
+				Path:     inc.Path,
+				Endpoint: inc.Endpoint,
+				Message:  inc.Message,
+				Since:    inc.Since.In(time.Local).Format(time.RFC3339),
+				Severity: inc.Severity,
+			}
+		}
+		return out
+	})
+	if reg != nil {
+		reg.SetUpstreamHealthFunc(func() []metrics.UpstreamEndpointHealth {
+			snaps := healthTracker.Snapshot()
+			out := make([]metrics.UpstreamEndpointHealth, len(snaps))
+			for i, s := range snaps {
+				out[i] = metrics.UpstreamEndpointHealth{
+					Path:          s.Path,
+					Endpoint:      s.Endpoint,
+					State:         s.State.String(),
+					EWMALatencyMs: s.EWMALatencyMs,
+					Requests:      s.Requests,
+					Failures:      s.Failures,
+				}
+			}
+			return out
+		})
+	}
+
 	runService("api server", apiServer.Run)
 
 	// Client-side: the local DNS listener(s), resolving through
@@ -177,12 +253,15 @@ func run(configPath string, cfg config.Config, logger *slog.Logger, levelVar *sl
 		res.Records = recStore
 		res.Cache = answerCache
 		res.RelayClient = relayClient
-		res.DoH = upstream.NewDoHClient(cfg.Upstream.DoHServers, time.Duration(cfg.Upstream.TimeoutSeconds)*time.Second)
-		res.DoT = upstream.NewDoTClient(cfg.Upstream.DoTServers, time.Duration(cfg.Upstream.TimeoutSeconds)*time.Second)
-		res.Plain = upstream.NewPlainClient(cfg.Upstream.PlainServers, time.Duration(cfg.Upstream.TimeoutSeconds)*time.Second)
+		res.DoH = newDoHClient(cfg.Upstream.DoHServers, time.Duration(cfg.Upstream.TimeoutSeconds)*time.Second, healthTracker)
+		res.DoT = newDoTClient(cfg.Upstream.DoTServers, time.Duration(cfg.Upstream.TimeoutSeconds)*time.Second, healthTracker)
+		res.Plain = newPlainClient(cfg.Upstream.PlainServers, time.Duration(cfg.Upstream.TimeoutSeconds)*time.Second, banList, reg, healthTracker)
 		res.Timeout = time.Duration(cfg.Relay.TimeoutSeconds) * time.Second
 		res.Logger = logger.With("component", "resolver")
 		res.Metrics = reg
+		res.Ban = banList
+		res.Health = healthTracker
+		res.Adaptive = cfg.Resolution.Adaptive
 
 		dnsSrv := dnsserver.New(
 			cfg.DNSServer.ListenAddr,
@@ -208,16 +287,20 @@ func run(configPath string, cfg config.Config, logger *slog.Logger, levelVar *sl
 	}
 
 	a := &app{
-		path:         configPath,
-		cfg:          cfg,
-		logger:       logger,
-		levelVar:     levelVar,
-		reg:          reg,
-		answerCache:  answerCache,
-		res:          res,
-		relayHandler: relayHandler,
-		apiServer:    apiServer,
+		path:          configPath,
+		cfg:           cfg,
+		logger:        logger,
+		levelVar:      levelVar,
+		reg:           reg,
+		answerCache:   answerCache,
+		res:           res,
+		relayHandler:  relayHandler,
+		apiServer:     apiServer,
+		healthTracker: healthTracker,
+		detector:      detector,
 	}
+
+	a.apiServer.SetStatusFunc(a.buildStatus)
 
 	// Watch config file for changes and reload automatically. SIGHUP still
 	// works as a manual fallback (e.g. if the editor writes in place without
@@ -291,6 +374,117 @@ func (a *app) watchConfig(ctx context.Context) {
 
 // reload loads the config file again and applies every change that does not
 // require restarting listeners. Restart-only diffs are logged as warnings.
+
+// buildStatus fills the admin status snapshot from the live config and
+// subsystem pointers. Slice fields (server lists, CIDRs, order) share the
+// headers currently held in a.cfg — no deep copy. Tokens are never
+// returned; only "configured" booleans.
+func (a *app) buildStatus() api.StatusSnapshot {
+	a.mu.Lock()
+	cfg := a.cfg
+	reg := a.reg
+	c := a.answerCache
+	res := a.res
+	relayH := a.relayHandler
+	ht := a.healthTracker
+	det := a.detector
+	a.mu.Unlock()
+
+	modeClient := cfg.Mode == config.ModeClient || cfg.Mode == config.ModeBoth
+	modeRelay := cfg.Mode == config.ModeRelay || cfg.Mode == config.ModeBoth
+
+	snap := api.StatusSnapshot{
+		Status: "ok",
+		Mode:   string(cfg.Mode),
+		Features: api.StatusFeatures{
+			Metrics:   reg != nil,
+			Records:   cfg.Records.Enabled,
+			Cache:     cfg.Cache.Enabled && c != nil,
+			Resolver:  modeClient && res != nil,
+			Relay:     modeRelay && relayH != nil,
+			RelayDoT:  modeRelay && cfg.API.RelayDoT.ListenAddr != "",
+			DNSServer: modeClient && cfg.DNSServer.ListenAddr != "",
+			Adaptive:  cfg.Resolution.Adaptive,
+			AdminAPI:  cfg.API.AdminPathPrefix != "",
+			AdminAuth: cfg.Security.AdminAuthToken != "",
+		},
+		Log: api.StatusLog{
+			Level:  cfg.Log.Level,
+			Format: cfg.Log.Format,
+		},
+		Listen: api.StatusListen{
+			API:       cfg.API.ListenAddr,
+			DNS:       cfg.DNSServer.ListenAddr,
+			DNSDoT:    cfg.DNSServer.DoT.ListenAddr,
+			RelayDoT:  cfg.API.RelayDoT.ListenAddr,
+			RelayPath: cfg.API.RelayPath,
+		},
+		Resolution: api.StatusResolution{
+			Order:    cfg.Resolution.Order,
+			Adaptive: cfg.Resolution.Adaptive,
+		},
+		Relay: api.StatusRelay{
+			Configured:     !cfg.RelayDisabled(),
+			URL:            cfg.Relay.URL,
+			DoTAddr:        cfg.Relay.DoTAddr,
+			TimeoutSeconds: cfg.Relay.TimeoutSeconds,
+			AuthConfigured: cfg.Relay.AuthToken != "",
+		},
+		Upstream: api.StatusUpstream{
+			TimeoutSeconds: cfg.Upstream.TimeoutSeconds,
+			DoHServers:     cfg.Upstream.DoHServers,
+			DoTServers:     cfg.Upstream.DoTServers,
+			PlainServers:   cfg.Upstream.PlainServers,
+			DoHCount:       len(cfg.Upstream.DoHServers),
+			DoTCount:       len(cfg.Upstream.DoTServers),
+			PlainCount:     len(cfg.Upstream.PlainServers),
+		},
+		Security: api.StatusSecurity{
+			RelayAuthConfigured:  cfg.Security.RelayAuthToken != "",
+			AdminAuthConfigured:  cfg.Security.AdminAuthToken != "",
+			AllowedDomains:       cfg.Security.AllowedDomains,
+			AllowedDomainsCount:  len(cfg.Security.AllowedDomains),
+			RelayRateLimitPerMin: cfg.Security.RelayRateLimitPerMinute,
+			BannedAnswerCIDRs:    cfg.Security.BannedAnswerCIDRs,
+			BanListActive:        len(cfg.Security.BannedAnswerCIDRs) > 0,
+		},
+	}
+
+	if cfg.Cache.Enabled {
+		sc := &api.StatusCache{
+			MinTTLSeconds:               cfg.Cache.MinTTLSeconds,
+			MaxTTLSeconds:               cfg.Cache.MaxTTLSeconds,
+			NegativeTTLSeconds:          cfg.Cache.NegativeTTLSeconds,
+			StaleWhileRevalidateSeconds: cfg.Cache.StaleWhileRevalidateSeconds,
+			PersistPath:                 cfg.Cache.PersistPath,
+			PrefetchEnabled:             cfg.Cache.Prefetch.Enabled,
+			PrefetchThresholdSeconds:    cfg.Cache.Prefetch.ThresholdSeconds,
+			PrefetchMinHits:             cfg.Cache.Prefetch.MinHits,
+		}
+		if c != nil {
+			sc.Entries = c.Len()
+			sc.Capacity = c.Cap()
+		} else {
+			sc.Capacity = cfg.Cache.MaxEntries
+		}
+		snap.Cache = sc
+	}
+
+	if cfg.Records.Enabled {
+		snap.Records = &api.StatusRecords{Path: cfg.Records.Path}
+	}
+
+	if ht != nil {
+		snap.Health.EndpointsObserved = ht.EndpointCount()
+	}
+	if det != nil {
+		// Refresh classification then report count (admin endpoint, rare).
+		_ = det.Evaluate()
+		snap.Health.ActiveIncidents = det.ActiveCount()
+	}
+	return snap
+}
+
 func (a *app) reload() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -348,13 +542,19 @@ func (a *app) reload() error {
 		if timeout <= 0 {
 			timeout = time.Duration(newCfg.Upstream.TimeoutSeconds) * time.Second
 		}
+		newBan, banErr := filter.NewBanList(newCfg.Security.BannedAnswerCIDRs)
+		if banErr != nil {
+			a.logger.Warn("some banned_answer_cidrs failed to parse on reload", "error", banErr)
+		}
+		a.res.Ban = newBan
 		a.res.ApplyRuntime(resolver.RuntimeConfig{
 			Order:       newCfg.Resolution.Order,
 			RelayClient: relayClient,
-			DoH:         upstream.NewDoHClient(newCfg.Upstream.DoHServers, time.Duration(newCfg.Upstream.TimeoutSeconds)*time.Second),
-			DoT:         upstream.NewDoTClient(newCfg.Upstream.DoTServers, time.Duration(newCfg.Upstream.TimeoutSeconds)*time.Second),
-			Plain:       upstream.NewPlainClient(newCfg.Upstream.PlainServers, time.Duration(newCfg.Upstream.TimeoutSeconds)*time.Second),
+			DoH:         newDoHClient(newCfg.Upstream.DoHServers, time.Duration(newCfg.Upstream.TimeoutSeconds)*time.Second, a.healthTracker),
+			DoT:         newDoTClient(newCfg.Upstream.DoTServers, time.Duration(newCfg.Upstream.TimeoutSeconds)*time.Second, a.healthTracker),
+			Plain:       newPlainClient(newCfg.Upstream.PlainServers, time.Duration(newCfg.Upstream.TimeoutSeconds)*time.Second, newBan, a.reg, a.healthTracker),
 			Timeout:     timeout,
+			Adaptive:    newCfg.Resolution.Adaptive,
 		})
 	}
 
@@ -365,11 +565,14 @@ func (a *app) reload() error {
 			newCfg.Security.AllowedDomains,
 			newCfg.Security.RelayRateLimitPerMinute,
 		)
+		newBan, _ := filter.NewBanList(newCfg.Security.BannedAnswerCIDRs)
 		a.relayHandler.ApplyUpstream(&upstream.Chain{
-			DoH:     upstream.NewDoHClient(newCfg.Upstream.DoHServers, time.Duration(newCfg.Upstream.TimeoutSeconds)*time.Second),
-			DoT:     upstream.NewDoTClient(newCfg.Upstream.DoTServers, time.Duration(newCfg.Upstream.TimeoutSeconds)*time.Second),
-			Plain:   upstream.NewPlainClient(newCfg.Upstream.PlainServers, time.Duration(newCfg.Upstream.TimeoutSeconds)*time.Second),
-			Metrics: a.reg,
+			DoH:      newDoHClient(newCfg.Upstream.DoHServers, time.Duration(newCfg.Upstream.TimeoutSeconds)*time.Second, a.healthTracker),
+			DoT:      newDoTClient(newCfg.Upstream.DoTServers, time.Duration(newCfg.Upstream.TimeoutSeconds)*time.Second, a.healthTracker),
+			Plain:    newPlainClient(newCfg.Upstream.PlainServers, time.Duration(newCfg.Upstream.TimeoutSeconds)*time.Second, newBan, a.reg, a.healthTracker),
+			Metrics:  a.reg,
+			Health:   a.healthTracker,
+			Adaptive: newCfg.Resolution.Adaptive,
 		})
 	}
 
@@ -406,4 +609,25 @@ func newLogger(cfg config.LogConfig, levelVar *slog.LevelVar) *slog.Logger {
 		return slog.New(slog.NewJSONHandler(os.Stdout, opts))
 	}
 	return slog.New(slog.NewTextHandler(os.Stdout, opts))
+}
+
+// newPlainClient builds a plain UDP/53 client with ban list, metrics, and health tracking.
+func newPlainClient(servers []string, timeout time.Duration, ban *filter.BanList, reg *metrics.Registry, ht *health.Tracker) *upstream.PlainClient {
+	p := upstream.NewPlainClient(servers, timeout)
+	p.Ban = ban
+	p.Metrics = reg
+	p.Health = ht
+	return p
+}
+
+func newDoHClient(servers []string, timeout time.Duration, ht *health.Tracker) *upstream.DoHClient {
+	c := upstream.NewDoHClient(servers, timeout)
+	c.Health = ht
+	return c
+}
+
+func newDoTClient(servers []string, timeout time.Duration, ht *health.Tracker) *upstream.DoTClient {
+	c := upstream.NewDoTClient(servers, timeout)
+	c.Health = ht
+	return c
 }

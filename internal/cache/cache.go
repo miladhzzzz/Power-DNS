@@ -451,6 +451,40 @@ func (c *Cache) Delete(name string, qtype uint16) {
 	}
 }
 
+// Flush removes every entry from the cache. Returns the number of entries
+// that were present before the flush.
+func (c *Cache) Flush() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := c.order.Len()
+	c.items = make(map[string]*list.Element)
+	c.order = list.New()
+	// Also clear refresh bookkeeping so a subsequent lookup for a previously
+	// hot key doesn't inherit a stale in-flight / cooldown state.
+	c.refreshMu.Lock()
+	c.refreshInFlight = make(map[string]bool)
+	c.refreshLastTry = make(map[string]time.Time)
+	c.refreshMu.Unlock()
+	return n
+}
+
+// FlushName removes every cached entry whose qname matches name (any type).
+// Returns how many entries were removed.
+func (c *Cache) FlushName(name string) int {
+	name = dns.Fqdn(name)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var removed int
+	for k, el := range c.items {
+		// key format is "fqdn|TYPE"
+		if len(k) > len(name) && k[:len(name)] == name && k[len(name)] == '|' {
+			c.removeLocked(el)
+			removed++
+		}
+	}
+	return removed
+}
+
 // Len returns the current number of cached entries.
 func (c *Cache) Len() int {
 	c.mu.Lock()

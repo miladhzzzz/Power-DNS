@@ -35,11 +35,19 @@ cert_file = ""
 key_file = ""
 
 # The HTTP API: health check, metrics, the DoH relay endpoint (relay/both
-# mode), and the records-management API.
+# mode), the records-management API, and admin management endpoints
+# (cache flush / refresh / status).
 [api]
 listen_addr = "127.0.0.1:8000"
 relay_path = "/dns-query"
 records_path_prefix = "/api/v1/records"
+admin_path_prefix = "/api/v1/admin"  # empty disables management endpoints
+
+# Prometheus metrics. When enabled = false, no counters/histograms are
+# recorded and GET /metrics returns 404 — zero overhead for hosts that
+# never scrape.
+[metrics]
+enabled = true
 
 # The relay's DoT endpoint (relay/both mode), alongside the DoH endpoint
 # above. Requires a real certificate for production use -- clients (and
@@ -59,7 +67,7 @@ max_entries = 10000
 min_ttl_seconds = 30
 max_ttl_seconds = 3600
 negative_ttl_seconds = 30
-persist_path = "" # e.g. "cache.gob" to survive restarts
+persist_path = "cache.gob" # e.g. "cache.gob" to survive restarts
 
 # Stale-while-revalidate: 0 (the default) disables this. When set above 0,
 # a lookup for an entry whose TTL has *already* expired -- but not more
@@ -120,6 +128,11 @@ timeout_seconds = 3
 # cache, relay, doh, dot, plain. The first to produce an answer wins.
 [resolution]
 order = ["records", "cache", "relay", "doh", "dot", "plain"]
+# When true, reorder upstream strategies (relay/doh/dot/plain) by observed
+# path health so a degraded transport yields to a healthier one. Local
+# strategies (records, cache) keep their slots. Encrypted paths are never
+# ranked below plain solely because plain is faster. Default false.
+adaptive = false
 
 [security]
 # Require "Authorization: Bearer <token>" on the relay's DoH endpoint. Leave
@@ -135,3 +148,11 @@ allowed_domains = []
 # Per-source-IP rate limit on the relay endpoint (DoH and DoT both). 0
 # disables it.
 relay_rate_limit_per_minute = 600
+# Networks that must never appear in a DNS A/AAAA answer from plain DNS
+# and must never be stored in the cache. Default is the Iranian GFI
+# injection range (10.10.34.34 / .35 / .36 live here). When plain DNS
+# returns one of these, the answer is discarded, the next plain server
+# is tried, and powerdns_poisoned_answers_total is incremented. DoH/DoT
+# are not filtered — those transports hide the query from on-path
+# injectors. Leave empty to disable.
+banned_answer_cidrs = ["10.10.34.0/24"]

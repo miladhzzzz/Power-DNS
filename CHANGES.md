@@ -477,3 +477,93 @@ still run a fully open relay by leaving these blank, but now it's a choice.
   (config parsing, zero transitive dependencies), and
   `golang.org/x/sync/singleflight` (request coalescing -- a single
   well-audited function from the Go team, not a general-purpose framework).
+
+## Metrics feature gate (`metrics.enabled`)
+
+Recording counters/histograms on every query is cheap, but on constrained
+hosts that never scrape Prometheus it is still pure overhead. Set
+`metrics.enabled = false` (default is `true`) to:
+
+- skip constructing the metrics registry entirely
+- pass `nil` into cache/resolver/upstream/relay so every `Inc*` / `Observe*`
+  becomes a no-op
+- make `GET /metrics` return 404
+
+Changing this setting requires a process restart (it is classified as
+restart-required by `config.PlanReload`).
+
+## Management / admin API
+
+Under `api.admin_path_prefix` (default `/api/v1/admin`), protected by the
+same `security.admin_auth_token` as the records API:
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/status` | Lightweight process status (cache size, which subsystems are enabled) |
+| GET | `/cache` | Current cache occupancy (`entries` / `capacity`) |
+| POST | `/cache/flush` | Clear the entire answer cache; optional `?name=` or `?name=&type=` to target a single name or (name, type) |
+| POST | `/cache/refresh` | Force an upstream re-resolve for `?name=&type=` and store the result in the cache (client/both mode) |
+
+Examples:
+
+```bash
+# Flush everything
+curl -X POST -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/api/v1/admin/cache/flush
+
+# Drop one name (any type)
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  'http://127.0.0.1:8000/api/v1/admin/cache/flush?name=youtube.com'
+
+# Force-refresh an A record
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  'http://127.0.0.1:8000/api/v1/admin/cache/refresh?name=example.com&type=A'
+```
+
+Leave `admin_path_prefix` empty to disable these endpoints entirely.
+
+## Answer ban list (Iranian GFI poison rejection)
+
+Plain UDP/53 is still interceptable by Iran's GFI middleboxes, which inject
+forged answers pointing at `10.10.34.0/24` (the classic block-page /
+black-hole range: `.34`, `.35`, `.36`). When a tunnel or relay drops and
+traffic falls through to plain DNS, those answers used to be accepted and
+cached — poisoning every subsequent client until TTL expired or the cache
+was flushed.
+
+v2 now rejects them:
+
+- Config: `security.banned_answer_cidrs` (default `["10.10.34.0/24"]`)
+- Applied only on the **plain** upstream path (`internal/upstream.PlainClient`)
+- A second check in the resolver refuses to **cache** any answer containing
+  a banned A/AAAA, regardless of strategy
+- Metric: `powerdns_poisoned_answers_total{path="plain"}` (and path=strategy
+  if the cache guard fires)
+
+DoH/DoT are intentionally not filtered: encrypted transports hide the
+query name from on-path injectors, so the classic GFI DNS-poison signature
+does not apply there.
+
+The ban-list structure is intentionally generic so future ad-block /
+known-bad-domain exclusions can share the same path.
+
+## Upstream health tracking + adaptive failover + incidents (Milestones 1–6)
+
+Implements Design-improvements.md milestones through 6:
+
+**M1–M4 (integrated from health-tracking package)**
+- `internal/upstream/health`: per-endpoint Tracker (EWMA latency, healthy/degraded/unhealthy/probing)
+- Within-transport server reordering via `Tracker.Order`
+- `GET /api/v1/health/upstreams` + Prometheus `powerdns_upstream_endpoint_*` series
+
+**M5 — Adaptive transport failover**
+- `resolution.adaptive = true` (opt-in) reorders upstream strategies by aggregate path health
+- Encrypted transports (relay/doh/dot) never rank below plain on latency alone
+- Hysteresis is the existing state machine (degrade/unhealthy thresholds + 30s cooldown)
+- Applies in both the client resolver and the relay `upstream.Chain`
+
+**M6 — Incident engine**
+- `health.Detector` classifies: `provider_degradation`, `transport_degradation`,
+  `upstream_unavailable`, `latency_degradation`, `dns_error_spike`
+- `GET /api/v1/health/incidents` returns the active set as JSON
+
+Poison ban-list and admin APIs remain unchanged.

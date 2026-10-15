@@ -1,269 +1,400 @@
-# Power-DNS v2
+# Power-DNS
 
-Power-DNS relays DNS resolution over an encrypted transport for people on
-networks where DNS-over-HTTPS (or DNS-over-TLS) is blocked or throttled. You
-run a **relay** somewhere with unrestricted DNS access; your **client** runs
-locally and forwards its queries to the relay over DoH and/or DoT --
-whichever transport your network doesn't block.
-
-This is a from-scratch v2 of the original project. It keeps the same goal
-but replaces most of the implementation. See [CHANGES.md](./CHANGES.md) for
-a detailed list of what changed and why -- this file covers what v2 *is* and
-how to run it.
-
-## How it works
+A local DNS resolver and optional remote relay for networks that interfere with DNS — especially where cleartext DNS is poisoned and public DoH/DoT endpoints are blocked or throttled.
 
 ```
-your device --DNS--> power-dns client --DoH and/or DoT--> power-dns relay --DoH/DoT/DNS--> real internet
-                            |
-                            +-- local records (your own overrides)
-                            +-- cache (TTL-aware)
-                            +-- direct DoH / DoT / plain DNS (if the relay is down)
+device ──UDP/TCP DNS──► power-dns client ──DoH and/or DoT──► power-dns relay ──DoH/DoT/plain──► real resolvers
+                              │
+                              ├── local records (authoritative overrides)
+                              ├── answer cache (TTL, prefetch, SWR)
+                              ├── poison filter (ban 10.10.34.0/24 on plain DNS)
+                              └── upstream health (per-endpoint EWMA + adaptive order)
 ```
 
-A single binary plays either role, or both, controlled by `mode` in
-`config.toml`:
+One binary, three modes (`mode` in config):
 
-- **`relay`** -- a spec-compliant [RFC 8484](https://datatracker.ietf.org/doc/html/rfc8484)
-  DNS-over-HTTPS server, and optionally an [RFC 7858](https://datatracker.ietf.org/doc/html/rfc7858)
-  DNS-over-TLS server on the same or a different port. Deploy it somewhere
-  with normal internet access, behind whatever TLS-terminating reverse proxy
-  you already run (for DoH) and/or with its own certificate (for DoT, since
-  DoT is raw TLS, not HTTP, so it can't share an HTTP reverse proxy the same
-  way). Because it speaks both protocols exactly to spec, you can also point
-  *any* DoH- or DoT-capable client at it directly (a browser, `systemd-resolved`,
-  `curl`), not just this project's own client.
-- **`client`** -- the resolver you point your devices at. For each query it
-  tries, in order: your own local records, its cache, the relay (DoH, then
-  DoT, if both are configured), then (if the relay is unreachable over
-  either transport) a direct DoH server, a direct DoT server, then plain
-  DNS. The order is configurable.
-- **`both`** -- runs both roles in one process, for local development or a
-  single-box deployment.
+| Mode | Role |
+|------|------|
+| `client` | Local DNS listener + full resolution chain |
+| `relay` | Public DoH (+ optional DoT) that resolves against real upstreams |
+| `both` | Client and relay in one process (dev / single box) |
 
-Running DoH and DoT side by side matters because they're blocked
-independently: a network that blocks HTTPS-based DoH may leave port 853 DoT
-alone, and vice versa. If one transport is unreachable, the client
-automatically falls back to the other before giving up.
+---
+
+## Why it exists
+
+1. **Cleartext DNS is poisoned.** On networks like Iran’s GFI, blocked names return private addresses in `10.10.34.0/24` (`.34` / `.35` / `.36`). Those answers are black holes outside the national network and must never be cached.
+2. **Encrypted DNS helps**, but known public DoH endpoints are often blocked too — so you need a **relay** on a host with open DNS, reached over whatever transport still works (DoH, DoT, or both).
+3. **Tunnels drop.** When a VPN/VLESS path fails, traffic can fall to plain DNS and every popular domain gets poisoned in seconds. Power-DNS rejects those answers and will not store them.
+4. **Upstreams are not equal.** One DoH provider may be fine while another is degraded. Power-DNS tracks each configured server independently and can prefer healthier paths.
+
+---
 
 ## Quick start
 
 ```bash
 go build -o power-dns ./cmd/power-dns
 cp config.example.toml config.toml
-# edit config.toml: set mode, and relay.url / relay.dot_addr if running as a client
+# edit mode, listen addresses, relay URL / upstreams
 ./power-dns -config config.toml
 ```
 
-Or with Docker Compose, which brings up a relay and a client already wired
-together (see `docker-compose.yml` and `config/{relay,client}.toml`):
+Docker (relay + client wired together):
 
 ```bash
 docker compose up -d --build
 ```
 
-### Running as a relay
+Point devices at the client listen address (default `127.0.0.1:5335`, or `0.0.0.0:5335` on a LAN host).
+
+### Minimal client
+
+```toml
+mode = "client"
+
+[dns_server]
+listen_addr = "0.0.0.0:5335"
+
+[relay]
+url = "https://your-relay.example/dns-query"  # DoH
+dot_addr = "your-relay.example:853"           # DoT; tried if DoH fails
+auth_token = ""                               # must match relay if set
+
+[upstream]
+doh_servers = ["https://dns.google/dns-query", "https://cloudflare-dns.com/dns-query"]
+dot_servers = ["1.1.1.1:853", "8.8.8.8:853"]
+plain_servers = ["1.1.1.1:53", "8.8.8.8:53"]
+
+[resolution]
+order = ["records", "cache", "relay", "doh", "dot", "plain"]
+adaptive = false   # set true to prefer healthier transports within the chain
+
+[security]
+banned_answer_cidrs = ["10.10.34.0/24"]
+```
+
+### Minimal relay
 
 ```toml
 mode = "relay"
+
 [api]
 listen_addr = "0.0.0.0:8000"
 relay_path = "/dns-query"
 
-# Optional: also serve DoT on 853, alongside DoH.
 [api.relay_dot]
 listen_addr = "0.0.0.0:853"
 cert_file = "/etc/letsencrypt/live/your-domain/fullchain.pem"
 key_file = "/etc/letsencrypt/live/your-domain/privkey.pem"
+
+[security]
+relay_auth_token = "change-me"
 ```
 
-Put the HTTP side behind TLS (Caddy, Traefik, nginx -- whatever you already
-use) and give your client `https://your-domain/dns-query` as `relay.url`.
-The DoT side terminates its own TLS directly (see `[api.relay_dot]` above),
-since DoT is raw TCP+TLS and generally can't be proxied the same way HTTP
-can. Set `security.relay_auth_token` if you don't want DoH to be a fully
-open relay (DoT has no equivalent -- see the note in
-`internal/relay/dotserver.go`).
+Put the HTTP (DoH) side behind Caddy / Traefik / nginx for TLS. DoT terminates TLS itself (raw TCP+TLS, not HTTP).
 
-### Running as a client
+---
 
-```toml
-mode = "client"
-[dns_server]
-listen_addr = "0.0.0.0:5335"
-[relay]
-url = "https://your-domain/dns-query" # DoH
-dot_addr = "your-domain:853"          # DoT; tried if DoH fails
-auth_token = "" # must match the relay's relay_auth_token, if set (DoH only)
-```
+## Feature map
 
-Point your device or router at `<client-host>:5335` as its DNS server.
+| Area | What you get |
+|------|----------------|
+| **Client DNS** | UDP+TCP listener; optional local DoT (`[dns_server.dot]`) for LAN devices |
+| **Relay** | RFC 8484 DoH + optional RFC 7858 DoT; domain allow-list; per-IP rate limit; DoH bearer auth |
+| **Resolution chain** | Configurable order: records → cache → relay → doh → dot → plain |
+| **Adaptive routing** | Opt-in: reorder upstream transports by measured health; within each transport, prefer best server |
+| **Upstream health** | Passive EWMA + four-state machine per configured server; no synthetic probes |
+| **Incidents** | Classified conditions from health data (provider/transport degradation, etc.) |
+| **Poison filter** | Ban list of answer CIDRs on plain DNS; never cached |
+| **Local records** | JSON-backed A/AAAA/CNAME/TXT overrides + REST API |
+| **Cache** | TTL clamp, LRU bound, optional persistence, prefetch, stale-while-revalidate |
+| **Coalescing** | Concurrent identical queries share one upstream round-trip (client + relay) |
+| **Admin API** | Cache flush/refresh, status |
+| **Metrics** | Prometheus text; can be fully disabled |
+| **Grafana** | Resolver/cache dashboard + Upstream Health dashboard |
+| **Hot-reload** | Edit config on disk (or SIGHUP); most tunables apply live |
 
-### Managing local records
+---
 
-The records API is the real implementation of what used to be a promise in
-the v1 README ("custom DNS record management ... in the hosts file"):
+## Resolution chain
+
+Default order (`resolution.order`):
+
+1. **records** — local authoritative overrides  
+2. **cache** — TTL-aware answer cache  
+3. **relay** — your Power-DNS relay (DoH, then DoT if configured)  
+4. **doh** — direct public DoH  
+5. **dot** — direct public DoT  
+6. **plain** — classic UDP/53 (last resort; poison-filtered)
+
+The first strategy that returns a usable answer wins.
+
+**Request coalescing** (always on): concurrent queries for the same name/type(/strategy) share one in-flight upstream call. Tracked as `powerdns_upstream_calls_total` vs `powerdns_upstream_coalesced_total` (and the relay equivalents).
+
+### Adaptive transport failover (`resolution.adaptive`)
+
+When `adaptive = true` (default `false`):
+
+- Upstream strategies (`relay` / `doh` / `dot` / `plain`) are reordered by aggregate path health.
+- **records** and **cache** keep their configured positions.
+- Encrypted paths are never ranked below plain solely because plain is faster; plain only rises when encrypted paths are unhealthy.
+- Hysteresis lives in the per-endpoint state machine (consecutive failures → degraded → unhealthy, cooldown, then probing on the next real query).
+
+Within a single transport, servers are always tried in health-preferred order (fastest healthy first). Every configured server is still tried on failure — nothing is dropped from the list.
+
+---
+
+## Upstream health tracking
+
+Each configured DoH URL, DoT `host:port`, and plain `host:port` is an independent **endpoint**.
+
+For every real attempt Power-DNS records:
+
+- success / failure  
+- latency → **EWMA** (α = 0.2)  
+- state: `healthy` → `degraded` → `unhealthy` → `probing` → back  
+
+No synthetic probe traffic: the next real query is the probe after cooldown.
 
 ```bash
-# Add an override
+curl localhost:8000/api/v1/health/upstreams
+```
+
+Example shape:
+
+```json
+[
+  {
+    "path": "doh",
+    "endpoint": "https://dns.google/dns-query",
+    "state": "healthy",
+    "score": 2870.5,
+    "ewma_latency_ms": 129.5,
+    "requests": 1204,
+    "successes": 1198,
+    "failures": 6
+  }
+]
+```
+
+Prometheus series (also on `/metrics`):
+
+| Metric | Labels |
+|--------|--------|
+| `powerdns_upstream_endpoint_requests_total` | `path`, `endpoint` |
+| `powerdns_upstream_endpoint_failures_total` | `path`, `endpoint` |
+| `powerdns_upstream_endpoint_latency_ewma_ms` | `path`, `endpoint` |
+| `powerdns_upstream_endpoint_state` | `path`, `endpoint`, `state` |
+
+---
+
+## Incident engine
+
+Passive classification of health snapshots (observation only — does not change routing by itself):
+
+| Kind | Meaning |
+|------|---------|
+| `provider_degradation` | One endpoint bad while peers on the same transport stay healthy |
+| `transport_degradation` | All endpoints on a transport are degraded or worse |
+| `upstream_unavailable` | All endpoints on a transport are unhealthy |
+| `latency_degradation` | Endpoint EWMA is elevated vs peers |
+| `dns_error_spike` | High failure ratio on an endpoint |
+
+```bash
+curl localhost:8000/api/v1/health/incidents
+```
+
+---
+
+## Poison filter (answer ban list)
+
+Classic GFI injection only works on **plain** DNS (cleartext query name).
+
+Power-DNS:
+
+- Rejects plain-DNS answers whose A/AAAA fall in `security.banned_answer_cidrs` (default `10.10.34.0/24`)
+- Tries the next plain server; records a failure for health tracking
+- **Never stores** banned answers in the cache (resolver-level second check)
+- Does **not** filter DoH/DoT responses
+
+```text
+powerdns_poisoned_answers_total{path="plain"}
+```
+
+If a tunnel drops and traffic hits plain DNS, this counter should rise while the cache stays clean. Flush a previously polluted cache with the admin API.
+
+The ban-list structure is shared infrastructure for future ad-block / bad-domain lists.
+
+---
+
+## Local records
+
+JSON-backed overrides, checked before cache and upstream. Types: A, AAAA, CNAME, TXT.
+
+```bash
+# Add
 curl -X POST localhost:8000/api/v1/records \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
   -d '{"name":"grafana.internal","type":"A","value":"10.0.0.5","ttl":300}'
 
-# List everything
+# List
 curl localhost:8000/api/v1/records
 
-# Delete it
+# Delete (optional value= limits to one RDATA)
 curl -X DELETE 'localhost:8000/api/v1/records?name=grafana.internal&type=A'
 ```
 
-Records are checked first, before cache or relay, so they always take
-priority. This also replaces the never-implemented Kubernetes/CoreDNS
-integration: point a small controller (or a shell script, or CoreDNS's own
-`forward` config) at this API to sync Service IPs in, instead of embedding a
-Kubernetes client in Power-DNS itself.
+Auth is optional; set `security.admin_auth_token` to require a bearer token on records and admin APIs.
 
-### Metrics
+---
 
-`GET /metrics` on the API port exposes Prometheus text-format metrics:
+## Management API
 
-- `powerdns_queries_total{strategy=...}` -- resolved (or failed) queries by
-  which strategy answered.
-- `powerdns_cache_hits_total` / `powerdns_cache_hit_rate` -- cumulative
-  *fresh*-hit effectiveness (excludes stale-while-revalidate hits; see
-  below).
-- `powerdns_cache_stale_hits_total` -- lookups served from an
-  expired-but-still-usable entry (stale-while-revalidate). Always zero
-  unless `cache.stale_while_revalidate_seconds` is set.
-- `powerdns_cache_stale_revalidations_total` /
-  `powerdns_cache_stale_revalidation_failures_total` -- outcomes of the
-  background refreshes stale hits trigger.
-- `powerdns_cache_effective_hit_rate` -- `(hits + stale hits) / total`: the
-  more meaningful number for "what fraction of queries did the caller
-  experience as instant," since a stale hit costs the caller nothing extra
-  either.
-- `powerdns_cache_misses_total{reason="not_found"|"expired"|"disabled"}` --
-  *why* a lookup missed, not just that it did.
-- `powerdns_cache_evictions_total{reason="lru"}` -- entries removed to make
-  room under `max_entries`.
-- `powerdns_cache_entries` / `powerdns_cache_capacity` -- current occupancy
-  against the configured cap.
-- `powerdns_upstream_latency_ms{path="relay"|"doh"|"dot"|"plain"}` -- a
-  latency histogram per upstream path, both for the client's own fallback
-  chain and, in relay/both mode, the relay's internal doh/dot/plain
-  sub-attempts.
-- `powerdns_relay_server_latency_ms` -- how long the relay itself spends
-  resolving a query end-to-end (relay/both mode only).
-- `powerdns_upstream_calls_total{path=...}` / `powerdns_upstream_coalesced_total{path=...}`
-  / `powerdns_upstream_coalesce_rate{path=...}` -- how many queries per path
-  triggered a real network call versus rode along on someone else's
-  in-flight one, and the resulting cumulative coalesce rate. Tracked on the
-  client's own fallback chain.
-- `powerdns_relay_calls_total` / `powerdns_relay_coalesced_total` /
-  `powerdns_relay_coalesce_rate` -- the same idea, but for the relay's own
-  incoming-query coalescing (relay/both mode only): concurrent DoH/DoT
-  requests for the same (qname, qtype) arriving at the relay -- from one
-  client or many -- share a single upstream resolution. This is the more
-  consequential of the two in practice, since a relay is more likely than a
-  lightly-loaded local resolver to see genuinely concurrent identical
-  queries (many clients, or many devices behind one relay, asking for the
-  same freshly-expired popular domain at once).
-- `powerdns_cache_prefetch_total{result="success"|"failure"}` -- background
-  prefetch refresh outcomes.
-- `powerdns_cache_prefetch_skipped_total{reason="in_flight"|"cooldown"}` --
-  prefetch candidates that were eligible but not attempted (already
-  running, or tried too recently) -- this is what makes the "don't hammer a
-  dead upstream" protection observable instead of just assumed.
-- `powerdns_cache_prefetch_protected_hits_total` -- fresh cache hits served
-  from an entry whose last fill was a successful background prefetch (the
-  prefetch analogue of `powerdns_cache_stale_hits_total`). Use
-  `protected / hits` for prefetch's share of fresh hits, and
-  `protected / prefetch_success` for hits gained per successful refresh.
-- `powerdns_cache_expired_entry_age_seconds` -- histogram of how far past
-  TTL an entry was on every past-expiry lookup (before the SWR vs miss
-  decision). Use it to size `cache.stale_while_revalidate_seconds` without
-  guessing (e.g. coverage at 180s ≈
-  `bucket{le="180"} / count`).
-- `powerdns_uptime_seconds`.
+Mounted under `api.admin_path_prefix` (default `/api/v1/admin`). Empty prefix disables these endpoints. Same bearer token as records when configured.
 
-See [CHANGES.md](./CHANGES.md) for why this replaces the originally-planned
-eBPF metrics.
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/status` | Feature flags + live settings (mode, resolution, upstreams, security, health counts, cache) |
+| `GET` | `/cache` | Cache entries / capacity |
+| `POST` | `/cache/flush` | Clear all, or `?name=` / `?name=&type=` |
+| `POST` | `/cache/refresh` | Force upstream re-resolve + store (`?name=&type=`) |
 
-### Cache prefetching, stale-while-revalidate, and request coalescing
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:8000/api/v1/admin/cache/flush
 
-Three related optimizations, all off by default except request coalescing:
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  'http://127.0.0.1:8000/api/v1/admin/cache/refresh?name=example.com&type=A'
+```
 
-- **Prefetching** (`[cache.prefetch]`, off by default): once a cached
-  entry's remaining TTL drops below `threshold_seconds`, *and* it's been
-  served from cache at least `min_hits` times, the next hit triggers a
-  background refresh -- the caller still gets the (still-valid) cached
-  answer immediately, and the cache is refreshed before it actually
-  expires. A popular record's TTL never reaches zero from a caller's point
-  of view. `min_hits` keeps a one-off lookup from generating background
-  upstream traffic for a record nobody else wants.
-- **Stale-while-revalidate** (`cache.stale_while_revalidate_seconds`, `0`/off
-  by default): the complement to prefetching, for whatever expires anyway.
-  A lookup for an entry whose TTL has *already* passed, but not more than
-  this many seconds ago, is still served immediately -- zero extra latency
-  -- while a background refresh brings it up to date. An entry older than
-  that is a genuine miss, resolved synchronously, same as always. Unlike
-  prefetching, this isn't gated by popularity: any entry within the window
-  gets served stale rather than costing its caller an upstream round trip.
-  `powerdns_cache_stale_hits_total`, `powerdns_cache_stale_revalidations_total`,
-  and `powerdns_cache_stale_revalidation_failures_total` track this
-  separately from ordinary hits/misses, and
-  `powerdns_cache_effective_hit_rate` reports `(hits + stale hits) / total`
-  -- the more meaningful number for "what fraction of queries did the
-  caller experience as instant," since a stale hit is indistinguishable
-  from a fresh one from the caller's side.
-- **Request coalescing** (always on, no config): concurrent queries for the
-  same (name, type[, strategy]) that all miss the cache at once -- 50
-  clients asking for a record in the same instant right after it expires,
-  say -- share a single in-flight upstream call instead of firing 50. Each
-  caller still gets its own correctly-addressed response; only the actual
-  network round trip is shared. This runs on both sides: the client's
-  fallback chain (relay/doh/dot/plain) and, independently, the relay's own
-  incoming-query handling -- so it protects a relay serving many external
-  clients just as much as it protects a single client's upstream fallback.
+Other always-on HTTP routes on the API port:
 
-### Debug logging
+| Path | Purpose |
+|------|---------|
+| `GET /healthz` | Liveness |
+| `GET /metrics` | Prometheus exposition (404 if metrics disabled) |
+| `GET /api/v1/health/upstreams` | Per-endpoint health JSON |
+| `GET /api/v1/health/incidents` | Active incident JSON |
+| relay path (default `/dns-query`) | RFC 8484 DoH (relay/both mode) |
 
-Set `log.level = "debug"` to trace exactly which route (records, cache,
-relay, doh, dot, or plain) answered each query, and for whom -- every debug
-line includes the origin (the querying client's address) and the strategy
-tried. At `info` level and above, only service lifecycle events and genuine
-failures are logged, so normal operation doesn't produce a line per query.
-An unconfigured relay (`relay.url` and `relay.dot_addr` both empty) is a
-valid, deliberately disabled state, not an error -- the client just skips
-straight to its doh/dot/plain fallbacks.
+---
 
-### Config hot-reload
+## Cache
 
-Power-DNS watches its `-config` file and **reloads automatically** when the
-file changes on disk (polled about once per second). You can also send
-`SIGHUP` for a manual reload. No process restart is required for the usual
-tuning knobs.
+| Setting | Behaviour |
+|---------|-----------|
+| `cache.enabled` | Master switch (restart to change) |
+| `max_entries` | LRU eviction bound |
+| `min_ttl_seconds` / `max_ttl_seconds` | Clamp upstream TTLs |
+| `negative_ttl_seconds` | Cache NXDOMAIN / failures briefly |
+| `persist_path` | Periodic snapshot to disk |
+| `stale_while_revalidate_seconds` | Serve recently expired answers while refreshing (0 = off) |
+| `[cache.prefetch]` | Background refresh of popular, soon-to-expire entries (off by default) |
+
+Prefetch and SWR trade a little upstream load for lower tail latency. Coalescing of in-flight refreshes and a short cooldown prevent hammering a dead upstream.
+
+---
+
+## Metrics & Grafana
+
+`GET /metrics` — Prometheus text format.
+
+Disable all instrumentation with:
+
+```toml
+[metrics]
+enabled = false
+```
+
+No registry is created; `/metrics` returns 404. Requires process restart to toggle.
+
+### Core series
+
+| Metric | Meaning |
+|--------|---------|
+| `powerdns_queries_total{strategy}` | Which strategy answered (or `failed`) |
+| `powerdns_cache_hits_total` | Fresh cache hits |
+| `powerdns_cache_stale_hits_total` | SWR hits |
+| `powerdns_cache_misses_total{reason}` | `not_found` / `expired` / `disabled` |
+| `powerdns_cache_effective_hit_rate` | (hits + stale) / total |
+| `powerdns_cache_entries` / `capacity` | Occupancy |
+| `powerdns_upstream_latency_ms{path}` | Histogram per transport |
+| `powerdns_upstream_calls_total` / `coalesced_total` | Coalescing |
+| `powerdns_relay_*` | Relay-side latency and coalescing |
+| `powerdns_cache_prefetch_*` | Prefetch outcomes / skips / protected hits |
+| `powerdns_poisoned_answers_total{path}` | Banned answers rejected |
+| `powerdns_upstream_endpoint_*` | Per-server health (see above) |
+| `powerdns_uptime_seconds` | Process age |
+
+### Dashboards
+
+Under `monitoring/grafana/provisioning/dashboards/`:
+
+- **Power-DNS — Resolver & Cache** — hit rates, coalescing, prefetch, path latency  
+- **Power-DNS — Upstream Health** — endpoint state, EWMA, failure rates, strategy vs path (“configured vs actual route”), poison rejects  
+
+```bash
+docker compose -f docker-compose.monitoring.yml up -d
+# Grafana :3000  (default admin/admin — change it)
+# Prometheus scrapes power-dns:8000/metrics
+```
+
+---
+
+## Security
+
+| Setting | Effect |
+|---------|--------|
+| `security.relay_auth_token` | Bearer required on relay **DoH** (DoT has no HTTP header; restrict DoT at the firewall or with mTLS) |
+| `security.admin_auth_token` | Bearer on records + admin APIs |
+| `security.allowed_domains` | Relay only resolves these suffixes (empty = all) |
+| `security.relay_rate_limit_per_minute` | Per-source-IP cap on the relay (0 = off) |
+| `security.banned_answer_cidrs` | Answer IPs rejected on plain DNS and never cached |
+
+---
+
+## Config hot-reload
+
+The process watches the config file (mtime/size, ~1s) and reloads on change. `SIGHUP` also triggers a reload.
 
 **Applies live (no restart):**
 
-| Area | Fields |
-|------|--------|
-| Log | `log.level` |
-| Cache | `min_ttl_seconds`, `max_ttl_seconds`, `negative_ttl_seconds`, `stale_while_revalidate_seconds`, `prefetch.*` |
-| Upstream | `doh_servers`, `dot_servers`, `plain_servers`, `timeout_seconds` |
-| Relay client | `url`, `dot_addr`, `auth_token`, `timeout_seconds` |
-| Resolution | `order` |
-| Security | `relay_auth_token`, `admin_auth_token`, `allowed_domains`, `relay_rate_limit_per_minute` |
+- `log.level`
+- Cache TTL / SWR / prefetch runtime options
+- Upstream server lists and timeouts
+- Relay client URL / DoT / token / timeout
+- `resolution.order`, `resolution.adaptive`
+- Security tokens, allow-list, rate limit, banned CIDRs
 
-**Still requires restart:** `mode`, DNS/API/DoT listen addresses, `cache.enabled` /
-`max_entries` / `persist_path`, `records.*`, `log.format`.
+**Requires restart:**
 
-On reload the process logs either `config reloaded applied=[...]` or
-warns which changed fields need a restart. In-memory cache entries are kept.
+- `mode`
+- DNS / API / DoT listen addresses and certificates
+- `api.admin_path_prefix`, path prefixes
+- `metrics.enabled`
+- `cache.enabled`, `max_entries`, `persist_path`
+- `records.*` (store path / enable)
+- `log.format`
 
-## Configuration reference
+In-memory cache entries are kept across live reloads.
 
-See the comments in [`config.example.toml`](./config.example.toml) -- every
-field is documented there.
+Every field is documented in [`config.example.toml`](./config.example.toml).  
+Design rationale and milestone history: [`Design-improvements.md`](./Design-improvements.md), [`CHANGES.md`](./CHANGES.md).
+
+---
+
+## Logging
+
+```toml
+[log]
+level = "info"    # debug | info | warn | error
+format = "text"   # text | json
+```
+
+At `debug`, each query logs origin, strategy tried, and outcome. At `info` and above, only lifecycle and genuine failures are logged.
+
+---
 
 ## Development
 
@@ -272,6 +403,27 @@ make build   # go build
 make test    # go test ./...
 make vet     # go vet ./...
 ```
+
+Package layout:
+
+```
+cmd/power-dns/          main, config watch, wiring
+internal/api/           HTTP: healthz, metrics, records, admin, health APIs, DoH mount
+internal/cache/         answer cache, prefetch, SWR
+internal/config/        TOML load, validate, reload plan
+internal/dnsserver/     client-facing UDP/TCP (+ optional DoT)
+internal/filter/        answer ban list (CIDRs)
+internal/metrics/       Prometheus registry
+internal/records/       local overrides store
+internal/relay/         DoH/DoT server + client
+internal/resolver/      resolution chain + adaptive order
+internal/upstream/      DoH/DoT/plain clients + Chain
+internal/upstream/health/  Tracker, Order, incidents
+internal/wire/          DNS message pack/unpack for DoH
+monitoring/             Prometheus + Grafana provisioning
+```
+
+---
 
 ## License
 
